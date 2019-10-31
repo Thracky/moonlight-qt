@@ -3,10 +3,12 @@
 #include <QKeyEvent>
 #include <QGuiApplication>
 #include <QWindow>
-
+#include <unistd.h>
 #include "settings/mappingmanager.h"
 
 #define AXIS_NAVIGATION_REPEAT_DELAY 150
+
+const char SC_GUIDS[][33] = {"03000000de2800000112000001000000","03000000de2800000211000001000000", "03000000de2800004211000001000000","03000000de280000fc11000001000000","05000000de2800000212000001000000","05000000de2800000511000001000000","05000000de2800000611000001000000"};
 
 SdlGamepadKeyNavigation::SdlGamepadKeyNavigation()
     : m_Enabled(false),
@@ -43,7 +45,6 @@ void SdlGamepadKeyNavigation::enable()
 
     MappingManager mappingManager;
     mappingManager.applyMappings();
-
     // Drop all pending gamepad add events. SDL will generate these for us
     // on first init of the GC subsystem. We can't depend on them due to
     // overlapping lifetimes of SdlGamepadKeyNavigation instances, so we
@@ -51,14 +52,25 @@ void SdlGamepadKeyNavigation::enable()
     SDL_PumpEvents();
     SDL_FlushEvent(SDL_CONTROLLERDEVICEADDED);
 
+
+    SDL_JoystickGUID* guid;
+    char guidstring[33];
+    int blacklisted = 0;
     // Open all currently attached game controllers
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
+        SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),guidstring,33);
+	for (int j = 0; j < 7; j++) {
+	    if (!strncmp(SC_GUIDS[j],guidstring,32)) {
+	    	blacklisted = 1;
+	    } 
+	}
+	if (SDL_IsGameController(i) && !blacklisted ) {
             SDL_GameController* gc = SDL_GameControllerOpen(i);
             if (gc != nullptr) {
                 m_Gamepads.append(gc);
             }
         }
+	blacklisted = 1;
     }
 
     // Poll every 50 ms for a new joystick event
@@ -155,9 +167,19 @@ void SdlGamepadKeyNavigation::onPollingTimerFired()
             break;
         }
         case SDL_CONTROLLERDEVICEADDED:
-            SDL_GameController* gc = SDL_GameControllerOpen(event.cdevice.which);
+	    int blacklisted = 0;
+            char guidstring[33];
+            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(event.cdevice.which),guidstring,33);
+            for (int j = 0; j < 7; j++) {
+                if (!strncmp(SC_GUIDS[j],guidstring,32)) {
+                    blacklisted = 1;
+                }
+            }
+            if (!blacklisted) {
+	    SDL_GameController* gc = SDL_GameControllerOpen(event.cdevice.which);
             if (gc != nullptr) {
                 m_Gamepads.append(gc);
+            }
             }
             break;
         }

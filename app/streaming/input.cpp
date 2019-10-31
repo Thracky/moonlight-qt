@@ -41,6 +41,9 @@
 // Determines the maximum motion amount before allowing movement
 #define MOUSE_EMULATION_DEADZONE 2
 
+const char SC_GUIDS[][33] = {"03000000de2800000112000001000000","03000000de2800000211000001000000", "03000000de2800004211000001000000","03000000de280000fc11000001000000","05000000de2800000212000001000000","05000000de2800000511000001000000","05000000de2800000611000001000000"};
+
+
 const int SdlInputHandler::k_ButtonMap[] = {
     A_FLAG, B_FLAG, X_FLAG, Y_FLAG,
     BACK_FLAG, SPECIAL_FLAG, PLAY_FLAG,
@@ -905,15 +908,26 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         SDL_GameController* controller;
         const char* mapping;
         char guidStr[33];
-
-        controller = SDL_GameControllerOpen(event->which);
-        if (controller == NULL) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "Failed to open gamepad: %s",
-                         SDL_GetError());
-            return;
+        int blacklisted = 0;
+        char guidstring[33];
+        SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(event->which),guidstring,33);
+        for (int j = 0; j < 7; j++) {
+            if (!strncmp(SC_GUIDS[j],guidstring,32)) {
+                blacklisted = 1;
+            }
         }
-
+        if (!blacklisted) {
+		controller = SDL_GameControllerOpen(event->which);
+        	if (controller == NULL) {
+            	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                	         "Failed to open gamepad: %s",
+                        	 SDL_GetError());
+            	return;
+        	}
+	}
+        else {
+	  return;
+	}
         // We used to use SDL_GameControllerGetPlayerIndex() here but that
         // can lead to strange issues due to bugs in Windows where an Xbox
         // controller will join as player 2, even though no player 1 controller
@@ -1267,6 +1281,8 @@ int SdlInputHandler::getAttachedGamepadMask()
 {
     int count;
     int mask;
+    char guidstring[33];
+    int blacklisted = 0;
 
     if (!m_MultiController) {
         // Player 1 is always present in non-MC mode
@@ -1275,7 +1291,13 @@ int SdlInputHandler::getAttachedGamepadMask()
 
     count = mask = 0;
     for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
+        SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i),guidstring,33);
+	for (int j = 0; j < 7; j++) {
+	    if (!strncmp(SC_GUIDS[j],guidstring,32)) {
+	       blacklisted = 1;
+            }
+        }
+    	    if (SDL_IsGameController(i) && !blacklisted) {
             mask |= (1 << count++);
         }
     }
