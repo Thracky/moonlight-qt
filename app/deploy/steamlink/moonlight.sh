@@ -4,7 +4,7 @@
 # it to a path on the onboard flash. Otherwise our
 # pairing data will be lost each reboot.
 HOME=/usr/local/moonlight
-
+./usb_sharing.sh start
 # Renice PE_Single_CPU which seems to host A/V stuff
 renice -10 -p $(pidof PE_Single_CPU)
 
