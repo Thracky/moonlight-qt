@@ -1,0 +1,28 @@
+Instructions for getting VirtualHere on Steam Link ready for moonlight:
+
+Step 1:
+On a FAT32 formatted USB stick, create the folders /steamlink/config/system/
+Place a text file enable_ssh.txt in that folder with any random text.
+Place the USB stick in your Steam Link, pull the power, and start it back up.
+
+Step 2:
+Back up the original usb_sharing.sh using an SSH client such as PuTTY or any built in SSH client. Connect to your Steam Link with the username "root" and password "steamlink123" then run the following:
+cp /home/steam/bin/usb_sharing.sh /home/steam/bin/usb_sharing.sh.bak
+
+Step 3:
+Now copy the new version of usb_sharing.sh to the Steam Link. This allows us to permanently place the license in the config file and ensure the Steam Controller is not blacklisted.
+Using an SCP utility such as Linux scp, or PuTTY SCP (pscp) transfer the usb_sharing.sh file to /home/steam/bin/
+Example: scp usb_sharing.sh root@<ip address>:/home/steam/bin/
+
+Step 4:
+Next, the current config file for VirtualHere needs to be removed so it can be regenerated properly.
+SSH to the Steam Link and run the following:
+rm /var/lib/vhusbdarm/vhusbdarm.ini
+
+Step 5:
+With at least one non-steam controller attached, go to the settings on your Steam Link, and go to the Virtualhere settings. Ensure at least one device is enabled for sharing.
+
+Step 6:
+Start streaming with a computer as your normally would. This causes our config file to regenerate with our license file in place permanently.
+
+Now your VirtualHere config file is ready to go for moonlight!
