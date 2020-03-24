@@ -7,6 +7,7 @@
 #include <QtGlobal>
 #include <QtMath>
 #include <QDir>
+#include <QGuiApplication>
 
 #define VK_0 0x30
 #define VK_A 0x41
@@ -43,6 +44,9 @@
 
 const char SC_GUIDS[][33] = {"03000000de2800000112000001000000","03000000de2800000211000001000000", "03000000de2800004211000001000000","03000000de280000fc11000001000000","05000000de2800000212000001000000","05000000de2800000511000001000000","05000000de2800000611000001000000"};
 
+// Haptic capabilities (in addition to those from SDL_HapticQuery())
+#define ML_HAPTIC_GC_RUMBLE      (1U << 16)
+#define ML_HAPTIC_SIMPLE_RUMBLE  (1U << 17)
 
 const int SdlInputHandler::k_ButtonMap[] = {
     A_FLAG, B_FLAG, X_FLAG, Y_FLAG,
@@ -85,6 +89,14 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "0");
 #endif
 
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+    // Enabling extended input reports allows rumble to function on Bluetooth PS4
+    // controllers, but breaks DirectInput applications. We will enable it because
+    // it's likely that working rumble is what the user is expecting. If they don't
+    // want this behavior, they can override it with the environment variable.
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
+#endif
+
     // We must initialize joystick explicitly before gamecontroller in order
     // to ensure we receive gamecontroller attach events for gamepads where
     // SDL doesn't have a built-in mapping. By starting joystick first, we
@@ -115,12 +127,14 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
                      SDL_GetError());
     }
 
+#if !SDL_VERSION_ATLEAST(2, 0, 9)
     SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
     if (SDL_InitSubSystem(SDL_INIT_HAPTIC) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_HAPTIC) failed: %s",
                      SDL_GetError());
     }
+#endif
 
     // Initialize the gamepad mask with currently attached gamepads to avoid
     // causing gamepads to unexpectedly disappear and reappear on the host
@@ -134,7 +148,17 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, NvComputer*, int s
     SDL_AtomicSet(&m_MouseDeltaX, 0);
     SDL_AtomicSet(&m_MouseDeltaY, 0);
 
-    m_MouseMoveTimer = SDL_AddTimer(MOUSE_POLLING_INTERVAL, SdlInputHandler::mouseMoveTimerCallback, this);
+    Uint32 pollingInterval = QString(qgetenv("MOUSE_POLLING_INTERVAL")).toUInt();
+    if (pollingInterval == 0) {
+        pollingInterval = MOUSE_POLLING_INTERVAL;
+    }
+    else {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using custom mouse polling interval: %u ms",
+                    pollingInterval);
+    }
+
+    m_MouseMoveTimer = SDL_AddTimer(pollingInterval, SdlInputHandler::mouseMoveTimerCallback, this);
 }
 
 SdlInputHandler::~SdlInputHandler()
@@ -144,9 +168,11 @@ SdlInputHandler::~SdlInputHandler()
             Session::get()->notifyMouseEmulationMode(false);
             SDL_RemoveTimer(m_GamepadState[i].mouseEmulationTimer);
         }
+#if !SDL_VERSION_ATLEAST(2, 0, 9)
         if (m_GamepadState[i].haptic != nullptr) {
             SDL_HapticClose(m_GamepadState[i].haptic);
         }
+#endif
         if (m_GamepadState[i].controller != nullptr) {
             SDL_GameControllerClose(m_GamepadState[i].controller);
         }
@@ -157,8 +183,10 @@ SdlInputHandler::~SdlInputHandler()
     SDL_RemoveTimer(m_RightButtonReleaseTimer);
     SDL_RemoveTimer(m_DragTimer);
 
+#if !SDL_VERSION_ATLEAST(2, 0, 9)
     SDL_QuitSubSystem(SDL_INIT_HAPTIC);
     SDL_assert(!SDL_WasInit(SDL_INIT_HAPTIC));
+#endif
 
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
     SDL_assert(!SDL_WasInit(SDL_INIT_GAMECONTROLLER));
@@ -211,8 +239,8 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
             SDL_PushEvent(&event);
             return;
         }
-        // Check for the unbind combo (Ctrl+Alt+Shift+Z)
-        else if (event->keysym.sym == SDLK_z) {
+        // Check for the unbind combo (Ctrl+Alt+Shift+Z) unless on EGLFS which has no window manager
+        else if (event->keysym.sym == SDLK_z && QGuiApplication::platformName() != "eglfs") {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Detected mouse capture toggle combo (SDLK)");
 
@@ -224,7 +252,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
             raiseAllKeys();
             return;
         }
-        else if (event->keysym.sym == SDLK_x) {
+        else if (event->keysym.sym == SDLK_x && QGuiApplication::platformName() != "eglfs") {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Detected full-screen toggle combo (SDLK)");
             Session::s_ActiveSession->toggleFullscreen();
@@ -260,7 +288,7 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
             return;
         }
         // Check for the unbind combo (Ctrl+Alt+Shift+Z)
-        else if (event->keysym.scancode == SDL_SCANCODE_Z) {
+        else if (event->keysym.scancode == SDL_SCANCODE_Z && QGuiApplication::platformName() != "eglfs") {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Detected mouse capture toggle combo (scancode)");
 
@@ -272,8 +300,8 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
             raiseAllKeys();
             return;
         }
-        // Check for the full-screen combo (Ctrl+Alt+Shift+X)
-        else if (event->keysym.scancode == SDL_SCANCODE_X) {
+        // Check for the full-screen combo (Ctrl+Alt+Shift+X) unless on EGLFS which has no window manager
+        else if (event->keysym.scancode == SDL_SCANCODE_X && QGuiApplication::platformName() != "eglfs") {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Detected full-screen toggle combo (scancode)");
             Session::s_ActiveSession->toggleFullscreen();
@@ -303,6 +331,12 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
         return;
     }
 
+    if (event->repeat) {
+        // Ignore repeat key down events
+        SDL_assert(event->state == SDL_PRESSED);
+        return;
+    }
+
     // Set modifier flags
     modifiers = 0;
     if (event->keysym.mod & KMOD_CTRL) {
@@ -313,6 +347,9 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
     }
     if (event->keysym.mod & KMOD_SHIFT) {
         modifiers |= MODIFIER_SHIFT;
+    }
+    if (event->keysym.mod & KMOD_GUI) {
+        modifiers |= MODIFIER_META;
     }
 
     // Set keycode. We explicitly use scancode here because GFE will try to correct
@@ -454,6 +491,16 @@ void SdlInputHandler::handleKeyEvent(SDL_KeyboardEvent* event)
             case SDL_SCANCODE_RALT:
                 keyCode = 0xA5;
                 break;
+            // Until we can fully capture these on all platforms (without conflicting with
+            // OS-provided shortcuts), we should avoid passing them through to the host.
+            #if 0
+            case SDL_SCANCODE_LGUI:
+                keyCode = 0x5B;
+                break;
+            case SDL_SCANCODE_RGUI:
+                keyCode = 0x5C;
+                break;
+            #endif
             case SDL_SCANCODE_AC_BACK:
                 keyCode = 0xA6;
                 break;
@@ -908,7 +955,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         SDL_GameController* controller;
         const char* mapping;
         char guidStr[33];
-        int blacklisted = 0;
+        uint32_t hapticCaps;
+
+	int blacklisted = 0;
         char guidstring[33];
         SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(event->which),guidstring,33);
         for (int j = 0; j < 7; j++) {
@@ -916,7 +965,8 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                 blacklisted = 1;
             }
         }
-        if (!blacklisted) {
+ 
+ 	if (!blacklisted) {
 		controller = SDL_GameControllerOpen(event->which);
         	if (controller == NULL) {
             	SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -953,6 +1003,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         state = &m_GamepadState[i];
         if (m_MultiController) {
             state->index = i;
+
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+            // This will change indicators on the controller to show the assigned
+            // player index. For Xbox 360 controllers, that means updating the LED
+            // ring to light up the corresponding quadrant for this player.
+            SDL_GameControllerSetPlayerIndex(controller, state->index);
+#endif
         }
         else {
             // Always player 1 in single controller mode
@@ -961,10 +1018,23 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 
         state->controller = controller;
         state->jsId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(state->controller));
+
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+        // Perform a tiny rumble to see if haptics are supported.
+        // NB: We cannot use zeros for rumble intensity or SDL will not actually call the JS driver
+        // and we'll get a (potentially false) success value returned.
+        hapticCaps = SDL_GameControllerRumble(controller, 1, 1, 1) == 0 ?
+                        ML_HAPTIC_GC_RUMBLE : 0;
+#else
         state->haptic = SDL_HapticOpenFromJoystick(SDL_GameControllerGetJoystick(state->controller));
         state->hapticEffectId = -1;
         state->hapticMethod = GAMEPAD_HAPTIC_METHOD_NONE;
         if (state->haptic != nullptr) {
+            // Query for supported haptic effects
+            hapticCaps = SDL_HapticQuery(state->haptic);
+            hapticCaps |= SDL_HapticRumbleSupported(state->haptic) ?
+                            ML_HAPTIC_SIMPLE_RUMBLE : 0;
+
             if ((SDL_HapticQuery(state->haptic) & SDL_HAPTIC_LEFTRIGHT) == 0) {
                 if (SDL_HapticRumbleSupported(state->haptic)) {
                     if (SDL_HapticRumbleInit(state->haptic) == 0) {
@@ -979,16 +1049,21 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
                 state->hapticMethod = GAMEPAD_HAPTIC_METHOD_LEFTRIGHT;
             }
         }
+        else {
+            hapticCaps = 0;
+        }
+#endif
 
         SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(state->controller)),
                                   guidStr, sizeof(guidStr));
         mapping = SDL_GameControllerMapping(state->controller);
         name = SDL_GameControllerName(state->controller);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Gamepad %d (player %d) is: %s (%s -> %s)",
+                    "Gamepad %d (player %d) is: %s (haptic capabilities: 0x%x) (mapping: %s -> %s)",
                     i,
                     state->index,
                     name != nullptr ? name : "<null>",
+                    hapticCaps,
                     guidStr,
                     mapping != nullptr ? mapping : "<null>");
         if (mapping != nullptr) {
@@ -1018,9 +1093,12 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             }
 
             SDL_GameControllerClose(state->controller);
+
+#if !SDL_VERSION_ATLEAST(2, 0, 9)
             if (state->haptic != nullptr) {
                 SDL_HapticClose(state->haptic);
             }
+#endif
 
             // Remove this from the gamepad mask in MC-mode
             if (m_MultiController) {
@@ -1081,6 +1159,11 @@ void SdlInputHandler::rumble(unsigned short controllerNumber, unsigned short low
         return;
     }
 
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+    if (m_GamepadState[controllerNumber].controller != nullptr) {
+        SDL_GameControllerRumble(m_GamepadState[controllerNumber].controller, lowFreqMotor, highFreqMotor, 30000);
+    }
+#else
     // Check if the controller supports haptics (and if the controller exists at all)
     SDL_Haptic* haptic = m_GamepadState[controllerNumber].haptic;
     if (haptic == nullptr) {
@@ -1124,7 +1207,7 @@ void SdlInputHandler::rumble(unsigned short controllerNumber, unsigned short low
                                             GAMEPAD_HAPTIC_SIMPLE_LOWFREQ_MOTOR_WEIGHT*lowFreqMotor) / 65535.0),
                              SDL_HAPTIC_INFINITY);
     }
-
+#endif
 }
 
 void SdlInputHandler::handleTouchFingerEvent(SDL_TouchFingerEvent* event)

@@ -12,6 +12,7 @@
 #include <QtEndian>
 #include <QNetworkProxy>
 
+#define FAST_FAIL_TIMEOUT_MS 2000
 #define REQUEST_TIMEOUT_MS 5000
 #define LAUNCH_TIMEOUT_MS 120000
 #define RESUME_TIMEOUT_MS 30000
@@ -92,7 +93,7 @@ NvHTTP::getCurrentGame(QString serverInfo)
 }
 
 QString
-NvHTTP::getServerInfo(NvLogLevel logLevel)
+NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
 {
     QString serverInfo;
 
@@ -106,7 +107,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel)
             serverInfo = openConnectionToString(m_BaseUrlHttps,
                                                 "serverinfo",
                                                 nullptr,
-                                                REQUEST_TIMEOUT_MS,
+                                                fastFail ? FAST_FAIL_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
                                                 logLevel);
             // Throws if the request failed
             verifyResponseStatus(serverInfo);
@@ -119,7 +120,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel)
                 serverInfo = openConnectionToString(m_BaseUrlHttp,
                                                     "serverinfo",
                                                     nullptr,
-                                                    REQUEST_TIMEOUT_MS,
+                                                    fastFail ? FAST_FAIL_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
                                                     logLevel);
                 verifyResponseStatus(serverInfo);
             }
@@ -136,7 +137,7 @@ NvHTTP::getServerInfo(NvLogLevel logLevel)
         serverInfo = openConnectionToString(m_BaseUrlHttp,
                                             "serverinfo",
                                             nullptr,
-                                            REQUEST_TIMEOUT_MS,
+                                            fastFail ? FAST_FAIL_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
                                             logLevel);
         verifyResponseStatus(serverInfo);
     }
@@ -256,16 +257,16 @@ NvHTTP::getDisplayModeList(QString serverInfo)
     while (!xmlReader.atEnd()) {
         while (xmlReader.readNextStartElement()) {
             QStringRef name = xmlReader.name();
-            if (xmlReader.name() == "DisplayMode") {
+            if (name == "DisplayMode") {
                 modes.append(NvDisplayMode());
             }
-            else if (xmlReader.name() == "Width") {
+            else if (name == "Width") {
                 modes.last().width = xmlReader.readElementText().toInt();
             }
-            else if (xmlReader.name() == "Height") {
+            else if (name == "Height") {
                 modes.last().height = xmlReader.readElementText().toInt();
             }
-            else if (xmlReader.name() == "RefreshRate") {
+            else if (name == "RefreshRate") {
                 modes.last().refreshRate = xmlReader.readElementText().toInt();
             }
         }
@@ -289,7 +290,7 @@ NvHTTP::getAppList()
     while (!xmlReader.atEnd()) {
         while (xmlReader.readNextStartElement()) {
             QStringRef name = xmlReader.name();
-            if (xmlReader.name() == "App") {
+            if (name == "App") {
                 // We must have a valid app before advancing to the next one
                 if (!apps.isEmpty() && !apps.last().isInitialized()) {
                     qWarning() << "Invalid applist XML";
@@ -298,13 +299,13 @@ NvHTTP::getAppList()
                 }
                 apps.append(NvApp());
             }
-            else if (xmlReader.name() == "AppTitle") {
+            else if (name == "AppTitle") {
                 apps.last().name = xmlReader.readElementText();
             }
-            else if (xmlReader.name() == "ID") {
+            else if (name == "ID") {
                 apps.last().id = xmlReader.readElementText().toInt();
             }
-            else if (xmlReader.name() == "IsHdrSupported") {
+            else if (name == "IsHdrSupported") {
                 apps.last().hdrSupported = xmlReader.readElementText() == "1";
             }
         }
@@ -453,6 +454,11 @@ NvHTTP::openConnection(QUrl baseUrl,
 
     // Add our client certificate
     request.setSslConfiguration(IdentityManager::get()->getSslConfig());
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0) && QT_VERSION < QT_VERSION_CHECK(5, 14, 2) && !defined(QT_NO_BEARERMANAGEMENT)
+    // HACK: Set network accessibility to work around QTBUG-80947
+    m_Nam.setNetworkAccessible(QNetworkAccessManager::Accessible);
+#endif
 
     QNetworkReply* reply = m_Nam.get(request);
 

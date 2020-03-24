@@ -4,12 +4,42 @@
 #include <SDL.h>
 
 #include <QtGlobal>
+#include <QFile>
+#include <QTextStream>
 
 SdlAudioRenderer::SdlAudioRenderer()
     : m_AudioDevice(0),
       m_AudioBuffer(nullptr)
 {
     SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
+
+#ifdef HAVE_MMAL
+    // HACK: PulseAudio on Raspberry Pi suffers from horrible underruns,
+    // so switch to ALSA if we detect that we're on a Pi. We need to
+    // actually set a bogus PULSE_SERVER so it doesn't try to get smart on us
+    // and find PA anyway. SDL_AUDIODRIVER=pulseaudio can override this logic.
+    if (qgetenv("SDL_AUDIODRIVER").toLower() != "pulseaudio") {
+        QFile file("/proc/cpuinfo");
+        if (file.open(QIODevice::ReadOnly | QFile::Text)) {
+            QTextStream textStream(&file);
+            if (textStream.readAll().contains("Raspberry Pi")) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Avoiding PulseAudio on Raspberry Pi");
+
+                qputenv("PULSE_SERVER", "");
+                if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "ALSA failed; falling back to default");
+                    qunsetenv("PULSE_SERVER");
+                }
+                else {
+                    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+                }
+            }
+        }
+    }
+#endif
+
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
@@ -34,7 +64,6 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     want.samples = opusConfig->samplesPerFrame;
 
     m_FrameSize = opusConfig->samplesPerFrame * sizeof(short) * opusConfig->channelCount;
-    m_FrameDurationMs = opusConfig->samplesPerFrame / 48;
 
     m_AudioDevice = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (m_AudioDevice == 0) {
@@ -52,7 +81,7 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Desired audio buffer: %u samples (%lu bytes)",
+                "Desired audio buffer: %u samples (%zu bytes)",
                 want.samples,
                 want.samples * sizeof(short) * want.channels);
 
@@ -97,7 +126,7 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
 
     // Don't queue if there's already more than 30 ms of audio data waiting
     // in Moonlight's audio queue.
-    if (LiGetPendingAudioFrames() * m_FrameDurationMs > 30) {
+    if (LiGetPendingAudioDuration() > 30) {
         return true;
     }
 
@@ -118,6 +147,6 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
 
 int SdlAudioRenderer::getCapabilities()
 {
-    // Direct submit can't be used because we use LiGetPendingAudioFrames()
-    return 0;
+    // Direct submit can't be used because we use LiGetPendingAudioDuration()
+    return CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
 }

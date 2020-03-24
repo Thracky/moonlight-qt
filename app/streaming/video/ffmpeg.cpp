@@ -45,9 +45,41 @@ bool FFmpegVideoDecoder::isHardwareAccelerated()
             (m_VideoDecoderCtx->codec->capabilities & AV_CODEC_CAP_HARDWARE) != 0;
 }
 
+bool FFmpegVideoDecoder::isAlwaysFullScreen()
+{
+    return m_BackendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_FULLSCREEN_ONLY;
+}
+
 int FFmpegVideoDecoder::getDecoderCapabilities()
 {
-    return m_BackendRenderer->getDecoderCapabilities();
+    int capabilities = m_BackendRenderer->getDecoderCapabilities();
+
+    if (!isHardwareAccelerated()) {
+        // Slice up to 4 times for parallel CPU decoding, once slice per core
+        int slices = qMin(MAX_SLICES, SDL_GetCPUCount());
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Encoder configured for %d slices per frame",
+                    slices);
+        capabilities |= CAPABILITY_SLICES_PER_FRAME(slices);
+    }
+
+    return capabilities;
+}
+
+int FFmpegVideoDecoder::getDecoderColorspace()
+{
+    return m_FrontendRenderer->getDecoderColorspace();
+}
+
+QSize FFmpegVideoDecoder::getDecoderMaxResolution()
+{
+    if (m_BackendRenderer->getRendererAttributes() & RENDERER_ATTRIBUTE_1080P_MAX) {
+        return QSize(1920, 1080);
+    }
+    else {
+        // No known maximum
+        return QSize(0, 0);
+    }
 }
 
 enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
@@ -57,7 +89,7 @@ enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
     const enum AVPixelFormat *p;
 
     for (p = pixFmts; *p != -1; p++) {
-        // Only match our hardware decoding codec or SW pixel
+        // Only match our hardware decoding codec or preferred SW pixel
         // format (if not using hardware decoding). It's crucial
         // to override the default get_format() which will try
         // to gracefully fall back to software decode and break us.
@@ -65,6 +97,15 @@ enum AVPixelFormat FFmpegVideoDecoder::ffGetFormat(AVCodecContext* context,
                    decoder->m_HwDecodeCfg->pix_fmt :
                    context->pix_fmt)) {
             return *p;
+        }
+    }
+
+    // Failed to match the preferred pixel formats. Try non-preferred options for non-hwaccel decoders.
+    if (decoder->m_HwDecodeCfg == nullptr) {
+        for (p = pixFmts; *p != -1; p++) {
+            if (decoder->m_FrontendRenderer->isPixelFormatSupported(decoder->m_VideoFormat, *p)) {
+                return *p;
+            }
         }
     }
 
@@ -79,8 +120,11 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_FrontendRenderer(nullptr),
       m_ConsecutiveFailedDecodes(0),
       m_Pacer(nullptr),
+      m_FramesIn(0),
+      m_FramesOut(0),
       m_LastFrameNumber(0),
       m_StreamFps(0),
+      m_VideoFormat(0),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly)
 {
@@ -159,23 +203,6 @@ bool FFmpegVideoDecoder::createFrontendRenderer(PDECODER_PARAMETERS params)
         }
     }
 
-    // Determine whether the frontend renderer prefers frame pacing
-    auto vsyncConstraint = m_FrontendRenderer->getFramePacingConstraint();
-    if (vsyncConstraint == IFFmpegRenderer::PACING_FORCE_OFF && params->enableFramePacing) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Frame pacing is forcefully disabled by the frontend renderer");
-        params->enableFramePacing = false;
-    }
-    else if (vsyncConstraint == IFFmpegRenderer::PACING_FORCE_ON && !params->enableFramePacing) {
-        // FIXME: This duplicates logic in Session.cpp
-        int displayHz = StreamUtils::getDisplayRefreshRate(params->window);
-        if (displayHz + 5 >= params->frameRate) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Frame pacing is forcefully enabled by the frontend renderer");
-            params->enableFramePacing = true;
-        }
-    }
-
     return true;
 }
 
@@ -190,6 +217,7 @@ bool FFmpegVideoDecoder::completeInitialization(AVCodec* decoder, PDECODER_PARAM
     }
 
     m_StreamFps = params->frameRate;
+    m_VideoFormat = params->videoFormat;
 
     // Don't bother initializing Pacer if we're not actually going to render
     if (!testFrame) {
@@ -238,8 +266,10 @@ bool FFmpegVideoDecoder::completeInitialization(AVCodec* decoder, PDECODER_PARAM
     m_VideoDecoderCtx->pix_fmt = m_FrontendRenderer->getPreferredPixelFormat(params->videoFormat);
     m_VideoDecoderCtx->get_format = ffGetFormat;
 
+    AVDictionary* options = nullptr;
+
     // Allow the backend renderer to attach data to this decoder
-    if (!m_BackendRenderer->prepareDecoderContext(m_VideoDecoderCtx)) {
+    if (!m_BackendRenderer->prepareDecoderContext(m_VideoDecoderCtx, &options)) {
         return false;
     }
 
@@ -250,7 +280,8 @@ bool FFmpegVideoDecoder::completeInitialization(AVCodec* decoder, PDECODER_PARAM
     SDL_assert(m_VideoDecoderCtx->opaque == nullptr);
     m_VideoDecoderCtx->opaque = this;
 
-    int err = avcodec_open2(m_VideoDecoderCtx, decoder, nullptr);
+    int err = avcodec_open2(m_VideoDecoderCtx, decoder, &options);
+    av_dict_free(&options);
     if (err < 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Unable to open decoder for format: %x",
@@ -264,16 +295,62 @@ bool FFmpegVideoDecoder::completeInitialization(AVCodec* decoder, PDECODER_PARAM
     // now to see if things will actually work when the video stream
     // comes in.
     if (testFrame) {
-        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
+        switch (params->videoFormat) {
+        case VIDEO_FORMAT_H264:
             m_Pkt.data = (uint8_t*)k_H264TestFrame;
             m_Pkt.size = sizeof(k_H264TestFrame);
-        }
-        else {
-            m_Pkt.data = (uint8_t*)k_HEVCTestFrame;
-            m_Pkt.size = sizeof(k_HEVCTestFrame);
+            break;
+        case VIDEO_FORMAT_H265:
+            m_Pkt.data = (uint8_t*)k_HEVCMainTestFrame;
+            m_Pkt.size = sizeof(k_HEVCMainTestFrame);
+            break;
+        case VIDEO_FORMAT_H265_MAIN10:
+            m_Pkt.data = (uint8_t*)k_HEVCMain10TestFrame;
+            m_Pkt.size = sizeof(k_HEVCMain10TestFrame);
+            break;
+        default:
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "No test frame for format: %x",
+                         params->videoFormat);
+            return false;
         }
 
-        err = avcodec_send_packet(m_VideoDecoderCtx, &m_Pkt);
+        AVFrame* frame = av_frame_alloc();
+        if (!frame) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Failed to allocate frame");
+            return false;
+        }
+
+        // Some decoders won't output on the first frame, so we'll submit
+        // a few test frames if we get an EAGAIN error.
+        for (int retries = 0; retries < 5; retries++) {
+            // Most FFmpeg decoders process input using a "push" model.
+            // We'll see those fail here if the format is not supported.
+            err = avcodec_send_packet(m_VideoDecoderCtx, &m_Pkt);
+            if (err < 0) {
+                av_frame_free(&frame);
+                char errorstring[512];
+                av_strerror(err, errorstring, sizeof(errorstring));
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Test decode failed: %s", errorstring);
+                return false;
+            }
+
+            // A few FFmpeg decoders (h264_mmal) process here using a "pull" model.
+            // Those decoders will fail here if the format is not supported.
+            err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
+            if (err == AVERROR(EAGAIN)) {
+                // Wait a little while to let the hardware work
+                SDL_Delay(100);
+            }
+            else {
+                // Done!
+                break;
+            }
+        }
+
+        av_frame_free(&frame);
         if (err < 0) {
             char errorstring[512];
             av_strerror(err, errorstring, sizeof(errorstring));
@@ -472,10 +549,60 @@ bool FFmpegVideoDecoder::tryInitializeRenderer(AVCodec* decoder,
 
 bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 {
-    AVCodec* decoder;
-
     // Increase log level until the first frame is decoded
     av_log_set_level(AV_LOG_DEBUG);
+
+    // First try decoders that the user has manually specified via environment variables.
+    // These must output surfaces in one of the formats that the SDL renderer supports,
+    // which is currently:
+    // - AV_PIX_FMT_YUV420P (preferred)
+    // - AV_PIX_FMT_NV12
+    // - AV_PIX_FMT_NV21
+    // These formats should cover most/all decoders that output in a standard YUV format.
+    {
+        QString h264DecoderHint = qgetenv("H264_DECODER_HINT");
+        if (!h264DecoderHint.isEmpty() && (params->videoFormat & VIDEO_FORMAT_MASK_H264)) {
+            QByteArray decoderString = h264DecoderHint.toLocal8Bit();
+            AVCodec* customAvcDecoder = avcodec_find_decoder_by_name(decoderString.constData());
+
+            if (customAvcDecoder != nullptr &&
+                    tryInitializeRenderer(customAvcDecoder, params, nullptr,
+                                          []() -> IFFmpegRenderer* { return new SdlRenderer(); })) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Using custom H.264 decoder (H264_DECODER_HINT): %s",
+                            decoderString.constData());
+                return true;
+            }
+            else {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "Custom H.264 decoder (H264_DECODER_HINT) failed to load: %s",
+                             decoderString.constData());
+            }
+        }
+    }
+    {
+        QString hevcDecoderHint = qgetenv("HEVC_DECODER_HINT");
+        if (!hevcDecoderHint.isEmpty() && (params->videoFormat & VIDEO_FORMAT_MASK_H265)) {
+            QByteArray decoderString = hevcDecoderHint.toLocal8Bit();
+            AVCodec* customHevcDecoder = avcodec_find_decoder_by_name(decoderString.constData());
+
+            if (customHevcDecoder != nullptr &&
+                    tryInitializeRenderer(customHevcDecoder, params, nullptr,
+                                          []() -> IFFmpegRenderer* { return new SdlRenderer(); })) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Using custom HEVC decoder (HEVC_DECODER_HINT): %s",
+                            decoderString.constData());
+                return true;
+            }
+            else {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "Custom HEVC decoder (HEVC_DECODER_HINT) failed to load: %s",
+                             decoderString.constData());
+            }
+        }
+    }
+
+    AVCodec* decoder;
 
     if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
         decoder = avcodec_find_decoder(AV_CODEC_ID_H264);
@@ -527,20 +654,58 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 #endif
 
 #ifdef HAVE_DRM
-        // RKMPP is a hardware accelerated decoder that outputs DRI PRIME buffers
-        AVCodec* rkmppDecoder;
+        {
+            // RKMPP is a hardware accelerated decoder that outputs DRI PRIME buffers
+            AVCodec* rkmppDecoder;
 
-        if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
-            rkmppDecoder = avcodec_find_decoder_by_name("h264_rkmpp");
+            if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
+                rkmppDecoder = avcodec_find_decoder_by_name("h264_rkmpp");
+            }
+            else {
+                rkmppDecoder = avcodec_find_decoder_by_name("hevc_rkmpp");
+            }
+
+            if (rkmppDecoder != nullptr &&
+                    tryInitializeRenderer(rkmppDecoder, params, nullptr,
+                                          []() -> IFFmpegRenderer* { return new DrmRenderer(); })) {
+                return true;
+            }
         }
-        else {
-            rkmppDecoder = avcodec_find_decoder_by_name("hevc_rkmpp");
+#endif
+
+#ifdef Q_OS_LINUX
+        {
+            AVCodec* nvmpiDecoder;
+
+            if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
+                nvmpiDecoder = avcodec_find_decoder_by_name("h264_nvmpi");
+            }
+            else {
+                nvmpiDecoder = avcodec_find_decoder_by_name("hevc_nvmpi");
+            }
+
+            if (nvmpiDecoder != nullptr &&
+                    tryInitializeRenderer(nvmpiDecoder, params, nullptr,
+                                          []() -> IFFmpegRenderer* { return new SdlRenderer(); })) {
+                return true;
+            }
         }
 
-        if (rkmppDecoder != nullptr &&
-                tryInitializeRenderer(rkmppDecoder, params, nullptr,
-                                      []() -> IFFmpegRenderer* { return new DrmRenderer(); })) {
-            return true;
+        {
+            AVCodec* v4l2Decoder;
+
+            if (params->videoFormat & VIDEO_FORMAT_MASK_H264) {
+                v4l2Decoder = avcodec_find_decoder_by_name("h264_v4l2m2m");
+            }
+            else {
+                v4l2Decoder = avcodec_find_decoder_by_name("hevc_v4l2m2m");
+            }
+
+            if (v4l2Decoder != nullptr &&
+                    tryInitializeRenderer(v4l2Decoder, params, nullptr,
+                                          []() -> IFFmpegRenderer* { return new SdlRenderer(); })) {
+                return true;
+            }
         }
 #endif
 
@@ -703,6 +868,8 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         return DR_NEED_IDR;
     }
 
+    m_FramesIn++;
+
     AVFrame* frame = av_frame_alloc();
     if (!frame) {
         // Failed to allocate a frame but we did submit,
@@ -714,18 +881,28 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
     err = avcodec_receive_frame(m_VideoDecoderCtx, frame);
     if (err == 0) {
+        m_FramesOut++;
+
         // Reset failed decodes count if we reached this far
         m_ConsecutiveFailedDecodes = 0;
 
         // Restore default log level after a successful decode
         av_log_set_level(AV_LOG_INFO);
 
+        // Store the presentation time
+        frame->pts = du->presentationTimeMs;
+
         // Capture a frame timestamp to measuring pacing delay
-        frame->pts = SDL_GetTicks();
+        frame->pkt_dts = SDL_GetTicks();
 
         // Count time in avcodec_send_packet() and avcodec_receive_frame()
         // as time spent decoding
         m_ActiveWndVideoStats.totalDecodeTime += SDL_GetTicks() - beforeDecode;
+
+        // Also count the frame-to-frame delay if the decoder is delaying frames
+        // until a subsequent frame is submitted.
+        m_ActiveWndVideoStats.totalDecodeTime += (m_FramesIn - m_FramesOut) * (1000 / m_StreamFps);
+
         m_ActiveWndVideoStats.decodedFrames++;
 
         // Queue the frame for rendering (or render now if pacer is disabled)

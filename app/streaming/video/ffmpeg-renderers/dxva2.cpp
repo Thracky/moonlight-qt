@@ -80,7 +80,7 @@ AVBufferRef* DXVA2Renderer::ffPoolAlloc(void* opaque, int)
     return NULL;
 }
 
-bool DXVA2Renderer::prepareDecoderContext(AVCodecContext* context)
+bool DXVA2Renderer::prepareDecoderContext(AVCodecContext* context, AVDictionary**)
 {
     // m_DXVAContext.workaround and report_id already initialized elsewhere
     m_DXVAContext.decoder = m_Decoder;
@@ -382,9 +382,6 @@ bool DXVA2Renderer::isDecoderBlacklisted()
     HRESULT hr;
     bool result = false;
 
-    // TODO: Update for HEVC Main10
-    SDL_assert(m_VideoFormat != VIDEO_FORMAT_H265_MAIN10);
-
     if (qgetenv("DXVA2_DISABLE_DECODER_BLACKLIST") == "1") {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "DXVA2 decoder blacklist is disabled");
@@ -432,6 +429,15 @@ bool DXVA2Renderer::isDecoderBlacklisted()
                                     "GPU blacklisted for HEVC due to hybrid decode");
                         result = (m_VideoFormat & VIDEO_FORMAT_MASK_H265) != 0;
                         break;
+                    case 0x1900: // Skylake
+                        // Blacklist these for HEVC Main10 to avoid hybrid decode.
+                        // Regular HEVC Main is fine though.
+                        if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                        "GPU blacklisted for HEVC Main10 due to hybrid decode");
+                            result = false;
+                            break;
+                        }
                     default:
                         // Intel drivers from before late-2017 had a bug that caused some strange artifacts
                         // when decoding HEVC. Avoid HEVC on drivers prior to build 4836 which I confirmed
@@ -540,12 +546,34 @@ bool DXVA2Renderer::initializeDevice(SDL_Window* window, bool enableVsync)
     d3dpp.hDeviceWindow = info.info.win.window;
     d3dpp.Flags = D3DPRESENTFLAG_VIDEO;
 
+    if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+        // Verify 10-bit A2R10G10B10 color support. This is only available
+        // as a display format in full-screen exclusive mode on DX9.
+        hr = d3d9ex->CheckDeviceType(adapterIndex,
+                                     D3DDEVTYPE_HAL,
+                                     D3DFMT_A2R10G10B10,
+                                     D3DFMT_A2R10G10B10,
+                                     FALSE);
+        if (FAILED(hr)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "GPU/driver doesn't support A2R10G10B10");
+            d3d9ex->Release();
+            return false;
+        }
+    }
+
     if ((windowFlags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
         d3dpp.Windowed = false;
         d3dpp.BackBufferWidth = currentMode.Width;
         d3dpp.BackBufferHeight = currentMode.Height;
         d3dpp.FullScreen_RefreshRateInHz = currentMode.RefreshRate;
-        d3dpp.BackBufferFormat = currentMode.Format;
+
+        if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+            d3dpp.BackBufferFormat = currentMode.Format = D3DFMT_A2R10G10B10;
+        }
+        else {
+            d3dpp.BackBufferFormat = currentMode.Format;
+        }
     }
     else {
         d3dpp.Windowed = true;
@@ -680,7 +708,13 @@ bool DXVA2Renderer::initialize(PDECODER_PARAMETERS params)
     m_Desc.SampleFormat.VideoPrimaries = DXVA2_VideoPrimaries_Unknown;
     m_Desc.SampleFormat.VideoTransferFunction = DXVA2_VideoTransFunc_Unknown;
     m_Desc.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
-    m_Desc.Format = (D3DFORMAT)MAKEFOURCC('N','V','1','2');
+
+    if (m_VideoFormat == VIDEO_FORMAT_H265_MAIN10) {
+        m_Desc.Format = (D3DFORMAT)MAKEFOURCC('P','0','1','0');
+    }
+    else {
+        m_Desc.Format = (D3DFORMAT)MAKEFOURCC('N','V','1','2');
+    }
 
     if (!initializeDevice(params->window, params->enableVsync)) {
         return false;
@@ -759,6 +793,20 @@ void DXVA2Renderer::notifyOverlayUpdated(Overlay::OverlayType type)
     default:
         SDL_assert(false);
         break;
+    }
+}
+
+int DXVA2Renderer::getDecoderColorspace()
+{
+    if (isDXVideoProcessorAPIBlacklisted()) {
+        // StretchRect() assumes Rec 601 on Intel GPUs
+        return COLORSPACE_REC_601;
+    }
+    else {
+        // VideoProcessBlt() *should* properly handle whatever, since
+        // we provide colorspace information. However, AMD GPUs seem to
+        // always assume Rec 709, so we'll use that as our default.
+        return COLORSPACE_REC_709;
     }
 }
 

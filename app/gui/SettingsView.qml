@@ -10,6 +10,8 @@ Flickable {
     id: settingsPage
     objectName: "Settings"
 
+    boundsBehavior: Flickable.OvershootBounds
+
     contentWidth: settingsColumn1.width > settingsColumn2.width ? settingsColumn1.width : settingsColumn2.width
     contentHeight: settingsColumn1.height > settingsColumn2.height ? settingsColumn1.height : settingsColumn2.height
 
@@ -88,7 +90,7 @@ Flickable {
 
                                     // Some platforms have different desktop resolutions
                                     // and native resolutions (like macOS with Retina displays)
-                                    if (displayResIndex == 0) {
+                                    if (displayResIndex === 0) {
                                         screenRect = SystemProperties.getDesktopResolution(displayIndex)
                                     }
                                     else {
@@ -125,6 +127,20 @@ Flickable {
                                                                        "video_width": ""+screenRect.width,
                                                                        "video_height": ""+screenRect.height
                                                                    })
+                                    }
+                                }
+                            }
+
+                            // Prune resolutions that are over the decoder's maximum
+                            var max_pixels = SystemProperties.maximumResolution.width * SystemProperties.maximumResolution.height;
+                            if (max_pixels > 0) {
+                                for (var j = 0; j < resolutionComboBox.count; j++) {
+                                    var existing_width = parseInt(resolutionListModel.get(j).video_width);
+                                    var existing_height = parseInt(resolutionListModel.get(j).video_height);
+
+                                    if (existing_width * existing_height > max_pixels) {
+                                        resolutionListModel.remove(j)
+                                        j--
                                     }
                                 }
                             }
@@ -338,19 +354,24 @@ Flickable {
                              }
                         }
 
-                        var savedWm = StreamingPreferences.windowMode
                         currentIndex = 0
-                        for (var i = 0; i < windowModeListModel.count; i++) {
-                             var thisWm = windowModeListModel.get(i).val;
-                             if (savedWm === thisWm) {
-                                 currentIndex = i
-                                 break
-                             }
+
+                        if (SystemProperties.hasWindowManager && !SystemProperties.rendererAlwaysFullScreen) {
+                            var savedWm = StreamingPreferences.windowMode
+                            for (var i = 0; i < windowModeListModel.count; i++) {
+                                 var thisWm = windowModeListModel.get(i).val;
+                                 if (savedWm === thisWm) {
+                                     currentIndex = i
+                                     break
+                                 }
+                            }
                         }
+
                         activated(currentIndex)
                     }
 
                     id: windowModeComboBox
+                    enabled: SystemProperties.hasWindowManager && !SystemProperties.rendererAlwaysFullScreen
                     hoverEnabled: true
                     textRole: "text"
                     model: ListModel {
@@ -484,7 +505,8 @@ Flickable {
                     id: startMaximizedCheck
                     text: "Maximize Moonlight window on startup"
                     font.pointSize: 12
-                    checked: !StreamingPreferences.startWindowed
+                    enabled: SystemProperties.hasWindowManager
+                    checked: !StreamingPreferences.startWindowed || !SystemProperties.hasWindowManager
                     onCheckedChanged: {
                         StreamingPreferences.startWindowed = !checked
                     }
@@ -708,20 +730,17 @@ Flickable {
                             val: StreamingPreferences.VCC_AUTO
                         }
                         ListElement {
-                            text: "Force H.264"
+                            text: "H.264"
                             val: StreamingPreferences.VCC_FORCE_H264
                         }
                         ListElement {
-                            text: "Force HEVC"
+                            text: "HEVC (H.265)"
                             val: StreamingPreferences.VCC_FORCE_HEVC
                         }
-                        // HDR seems to be broken in GFE 3.14.1, and even when that's fixed
-                        // we'll probably need to gate this feature on OS support in our
-                        // renderers.
-                        /* ListElement {
-                            text: "Force HEVC HDR"
+                        ListElement {
+                            text: "HEVC HDR (Experimental)"
                             val: StreamingPreferences.VCC_FORCE_HEVC_HDR
-                        } */
+                        }
                     }
                     // ::onActivated must be used, as it only listens for when the index is changed by a human
                     onActivated : {

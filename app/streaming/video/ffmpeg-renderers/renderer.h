@@ -9,16 +9,13 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+#define RENDERER_ATTRIBUTE_FULLSCREEN_ONLY 0x01
+#define RENDERER_ATTRIBUTE_1080P_MAX 0x02
+
 class IFFmpegRenderer : public Overlay::IOverlayRenderer {
 public:
-    enum FramePacingConstraint {
-        PACING_FORCE_OFF,
-        PACING_FORCE_ON,
-        PACING_ANY
-    };
-
     virtual bool initialize(PDECODER_PARAMETERS params) = 0;
-    virtual bool prepareDecoderContext(AVCodecContext* context) = 0;
+    virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) = 0;
     virtual void renderFrame(AVFrame* frame) = 0;
 
     virtual bool needsTestFrame() {
@@ -31,9 +28,14 @@ public:
         return 0;
     }
 
-    virtual FramePacingConstraint getFramePacingConstraint() {
-        // No pacing preference
-        return PACING_ANY;
+    virtual int getRendererAttributes() {
+        // No special attributes by default
+        return 0;
+    }
+
+    virtual int getDecoderColorspace() {
+        // Rec 601 is default
+        return COLORSPACE_REC_601;
     }
 
     virtual bool isRenderThreadSupported() {
@@ -47,9 +49,19 @@ public:
     }
 
     virtual enum AVPixelFormat getPreferredPixelFormat(int videoFormat) {
-        // Planar YUV 4:2:0
-        SDL_assert(videoFormat != VIDEO_FORMAT_H265_MAIN10);
-        return AV_PIX_FMT_YUV420P;
+        if (videoFormat == VIDEO_FORMAT_H265_MAIN10) {
+            // 10-bit YUV 4:2:0
+            return AV_PIX_FMT_P010;
+        }
+        else {
+            // Planar YUV 4:2:0
+            return AV_PIX_FMT_YUV420P;
+        }
+    }
+
+    virtual bool isPixelFormatSupported(int videoFormat, enum AVPixelFormat pixelFormat) {
+        // By default, we only support the preferred pixel format
+        return getPreferredPixelFormat(videoFormat) == pixelFormat;
     }
 
     // IOverlayRenderer

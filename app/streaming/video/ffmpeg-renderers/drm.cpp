@@ -33,7 +33,7 @@ DrmRenderer::~DrmRenderer()
     }
 }
 
-bool DrmRenderer::prepareDecoderContext(AVCodecContext*)
+bool DrmRenderer::prepareDecoderContext(AVCodecContext*, AVDictionary**)
 {
     /* Nothing to do */
 
@@ -192,6 +192,12 @@ enum AVPixelFormat DrmRenderer::getPreferredPixelFormat(int)
 {
     // DRM PRIME buffers
     return AV_PIX_FMT_DRM_PRIME;
+}
+
+int DrmRenderer::getRendererAttributes()
+{
+    // This renderer can only draw in full-screen
+    return RENDERER_ATTRIBUTE_FULLSCREEN_ONLY;
 }
 
 void DrmRenderer::renderFrame(AVFrame* frame)

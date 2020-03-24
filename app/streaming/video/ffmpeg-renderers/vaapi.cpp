@@ -138,7 +138,57 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
 
     int major, minor;
     VAStatus status;
-    status = vaInitialize(vaDeviceContext->display, &major, &minor);
+
+    for (;;) {
+        status = vaInitialize(vaDeviceContext->display, &major, &minor);
+        if (status != VA_STATUS_SUCCESS && qEnvironmentVariableIsEmpty("LIBVA_DRIVER_NAME")) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Trying fallback VAAPI driver names");
+            if (status != VA_STATUS_SUCCESS) {
+                // The iHD driver supports newer hardware like Ice Lake and Comet Lake.
+                // It should be picked by default on those platforms, but that doesn't
+                // always seem to be the case for some reason.
+                vaSetDriverName(vaDeviceContext->display, const_cast<char*>("iHD"));
+                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+            }
+            if (status != VA_STATUS_SUCCESS) {
+                // The Iris driver in Mesa 20.0 returns a bogus VA driver (iris_drv_video.so)
+                // even though the correct driver is still i965. If we hit this path, we'll
+                // explicitly try i965 to handle this case.
+                vaSetDriverName(vaDeviceContext->display, const_cast<char*>("i965"));
+                status = vaInitialize(vaDeviceContext->display, &major, &minor);
+            }
+        }
+
+        if (status == VA_STATUS_SUCCESS) {
+            // Success!
+            break;
+        }
+
+        if (qEnvironmentVariableIsEmpty("LIBVA_DRIVERS_PATH")) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Trying fallback VAAPI driver paths");
+
+            qputenv("LIBVA_DRIVERS_PATH",
+        #if Q_PROCESSOR_WORDSIZE == 8
+                    "/usr/lib64/dri:" // Fedora x86_64
+                    "/usr/lib64/va/drivers:" // Gentoo x86_64
+        #endif
+                    "/usr/lib/dri:" // Arch i386 & x86_64, Fedora i386
+                    "/usr/lib/va/drivers:" // Gentoo i386
+        #if defined(Q_PROCESSOR_X86_64)
+                    "/usr/lib/x86_64-linux-gnu/dri:" // Ubuntu/Debian x86_64
+        #elif defined(Q_PROCESSOR_X86_32)
+                    "/usr/lib/i386-linux-gnu/dri:" // Ubuntu/Debian i386
+        #endif
+                    );
+        }
+        else {
+            // Give up
+            break;
+        }
+    }
+
     if (status != VA_STATUS_SUCCESS) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Failed to initialize VAAPI: %d",
@@ -192,7 +242,7 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
 }
 
 bool
-VAAPIRenderer::prepareDecoderContext(AVCodecContext* context)
+VAAPIRenderer::prepareDecoderContext(AVCodecContext* context, AVDictionary**)
 {
     context->hw_device_ctx = av_buffer_ref(m_HwContext);
 
@@ -219,6 +269,13 @@ VAAPIRenderer::isDirectRenderingSupported()
     return m_WindowSystem == SDL_SYSWM_X11;
 }
 
+int VAAPIRenderer::getDecoderColorspace()
+{
+    // Gallium drivers don't support Rec 709 yet - https://gitlab.freedesktop.org/mesa/mesa/issues/1915
+    // Intel-vaapi-driver defaults to Rec 601 - https://github.com/intel/intel-vaapi-driver/blob/021bcb79d1bd873bbd9fbca55f40320344bab866/src/i965_output_dri.c#L186
+    return COLORSPACE_REC_601;
+}
+
 void
 VAAPIRenderer::renderFrame(AVFrame* frame)
 {
@@ -238,6 +295,27 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
 
     if (m_WindowSystem == SDL_SYSWM_X11) {
 #ifdef HAVE_LIBVA_X11
+        unsigned int flags = 0;
+
+        // NB: Not all VAAPI drivers respect these flags. Many drivers
+        // just ignore them and do the color conversion as Rec 601.
+        switch (frame->colorspace) {
+        case AVCOL_SPC_BT709:
+            flags |= VA_SRC_BT709;
+            break;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            flags |= VA_SRC_BT601;
+            break;
+        case AVCOL_SPC_SMPTE240M:
+            flags |= VA_SRC_SMPTE_240;
+            break;
+        default:
+            // Unknown colorspace
+            SDL_assert(false);
+            break;
+        }
+
         vaPutSurface(vaDeviceContext->display,
                      surface,
                      m_XWindow,
@@ -245,7 +323,7 @@ VAAPIRenderer::renderFrame(AVFrame* frame)
                      m_VideoWidth, m_VideoHeight,
                      dst.x, dst.y,
                      dst.w, dst.h,
-                     NULL, 0, 0);
+                     NULL, 0, flags);
 #endif
     }
     else if (m_WindowSystem == SDL_SYSWM_WAYLAND) {

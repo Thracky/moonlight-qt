@@ -25,6 +25,10 @@
 #define SER_CONNWARNINGS "connwarnings"
 #define SER_RICHPRESENCE "richpresence"
 #define SER_GAMEPADMOUSE "gamepadmouse"
+#define SER_DEFAULTVER "defaultver"
+#define SER_PACKETSIZE "packetsize"
+
+#define CURRENT_DEFAULT_VER 1
 
 StreamingPreferences::StreamingPreferences(QObject *parent)
     : QObject(parent)
@@ -35,6 +39,8 @@ StreamingPreferences::StreamingPreferences(QObject *parent)
 void StreamingPreferences::reload()
 {
     QSettings settings;
+
+    int defaultVer = settings.value(SER_DEFAULTVER, 0).toInt();
 
 #ifdef Q_OS_DARWIN
     recommendedFullScreenMode = WindowMode::WM_FULLSCREEN_DESKTOP;
@@ -59,6 +65,7 @@ void StreamingPreferences::reload()
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
+    packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     audioConfig = static_cast<AudioConfig>(settings.value(SER_AUDIOCFG,
                                                   static_cast<int>(AudioConfig::AC_STEREO)).toInt());
     videoCodecConfig = static_cast<VideoCodecConfig>(settings.value(SER_VIDEOCFG,
@@ -69,6 +76,16 @@ void StreamingPreferences::reload()
                                                         // Try to load from the old preference value too
                                                         static_cast<int>(settings.value(SER_FULLSCREEN, true).toBool() ?
                                                                              recommendedFullScreenMode : WindowMode::WM_WINDOWED)).toInt());
+
+    // Perform default settings updates as required based on last default version
+    if (defaultVer == 0) {
+#ifdef Q_OS_DARWIN
+        // Update window mode setting on macOS from full-screen (old default) to borderless windowed (new default)
+        if (windowMode == WindowMode::WM_FULLSCREEN) {
+            windowMode = WindowMode::WM_FULLSCREEN_DESKTOP;
+        }
+#endif
+    }
 }
 
 void StreamingPreferences::save()
@@ -92,10 +109,12 @@ void StreamingPreferences::save()
     settings.setValue(SER_CONNWARNINGS, connectionWarnings);
     settings.setValue(SER_RICHPRESENCE, richPresence);
     settings.setValue(SER_GAMEPADMOUSE, gamepadMouse);
+    settings.setValue(SER_PACKETSIZE, packetSize);
     settings.setValue(SER_AUDIOCFG, static_cast<int>(audioConfig));
     settings.setValue(SER_VIDEOCFG, static_cast<int>(videoCodecConfig));
     settings.setValue(SER_VIDEODEC, static_cast<int>(videoDecoderSelection));
     settings.setValue(SER_WINDOWMODE, static_cast<int>(windowMode));
+    settings.setValue(SER_DEFAULTVER, CURRENT_DEFAULT_VER);
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps)

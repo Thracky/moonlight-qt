@@ -14,6 +14,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <AVFoundation/AVFoundation.h>
 #import <dispatch/dispatch.h>
+#import <Metal/Metal.h>
 
 class VTRenderer : public IFFmpegRenderer
 {
@@ -24,6 +25,7 @@ public:
           m_FormatDesc(nullptr),
           m_StreamView(nullptr),
           m_DisplayLink(nullptr),
+          m_ColorSpace(nullptr),
           m_VsyncMutex(nullptr),
           m_VsyncPassed(nullptr)
     {
@@ -51,6 +53,10 @@ public:
 
         if (m_FormatDesc != nullptr) {
             CFRelease(m_FormatDesc);
+        }
+
+        if (m_ColorSpace != nullptr) {
+            CGColorSpaceRelease(m_ColorSpace);
         }
 
         for (int i = 0; i < Overlay::OverlayMax; i++) {
@@ -153,6 +159,91 @@ public:
             return;
         }
 
+        // Strip the attachments added by VT. They are likely wrong.
+        CVBufferRemoveAllAttachments(pixBuf);
+
+        CVBufferSetAttachment(pixBuf,
+                              kCVImageBufferChromaSubsamplingKey,
+                              kCVImageBufferChromaSubsampling_420,
+                              kCVAttachmentMode_ShouldPropagate);
+
+        switch (frame->color_primaries) {
+        case AVCOL_PRI_BT709:
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferColorPrimariesKey,
+                                  kCVImageBufferColorPrimaries_ITU_R_709_2,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        case AVCOL_PRI_SMPTE170M:
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferColorPrimariesKey,
+                                  kCVImageBufferColorPrimaries_SMPTE_C,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        case AVCOL_PRI_BT2020:
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferColorPrimariesKey,
+                                  kCVImageBufferColorPrimaries_ITU_R_2020,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        default:
+            break;
+        }
+
+        switch (frame->color_trc) {
+        case AVCOL_TRC_BT709:
+        case AVCOL_TRC_SMPTE170M:
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferTransferFunctionKey,
+                                  kCVImageBufferTransferFunction_ITU_R_709_2,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        case AVCOL_TRC_BT2020_10:
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferTransferFunctionKey,
+                                  kCVImageBufferTransferFunction_ITU_R_2020,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        default:
+            break;
+        }
+
+        switch (frame->colorspace) {
+        case AVCOL_SPC_BT709:
+            if (m_ColorSpace == nullptr) {
+                m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_709);
+            }
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferYCbCrMatrixKey,
+                                  kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        case AVCOL_SPC_BT2020_NCL:
+            if (m_ColorSpace == nullptr) {
+                m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2020);
+            }
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferYCbCrMatrixKey,
+                                  kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        case AVCOL_SPC_SMPTE170M:
+            if (m_ColorSpace == nullptr) {
+                m_ColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            }
+            CVBufferSetAttachment(pixBuf,
+                                  kCVImageBufferYCbCrMatrixKey,
+                                  kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+                                  kCVAttachmentMode_ShouldPropagate);
+            break;
+        default:
+            break;
+        }
+
+        if (m_ColorSpace != nullptr) {
+            CVBufferSetAttachment(pixBuf, kCVImageBufferCGColorSpaceKey, m_ColorSpace, kCVAttachmentMode_ShouldPropagate);
+        }
+
         // If the format has changed or doesn't exist yet, construct it with the
         // pixel buffer data
         if (!m_FormatDesc || !CMVideoFormatDescriptionMatchesImageBuffer(m_FormatDesc, pixBuf)) {
@@ -234,6 +325,52 @@ public:
                                 "No HW accelerated HEVC decode via VT");
                     return false;
                 }
+
+                // HEVC Main10 requires more extensive checks because there's no
+                // simple API to check for Main10 hardware decoding, and if we don't
+                // have it, we'll silently get software decoding with horrible performance.
+                if (params->videoFormat == VIDEO_FORMAT_H265_MAIN10) {
+                #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101400
+                    if (__builtin_available(macOS 10.14, *)) {
+                        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+                        if (device == nullptr) {
+                            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                        "Unable to get default Metal device");
+                            return false;
+                        }
+
+                        // Exclude all GPUs earlier than macOSGPUFamily2
+                        // https://developer.apple.com/documentation/metal/mtlfeatureset/mtlfeatureset_macos_gpufamily2_v1
+                        if ([device supportsFeatureSet:MTLFeatureSet_macOS_GPUFamily2_v1]) {
+                            if ([device.name containsString:@"Intel"]) {
+                                // 500-series Intel GPUs are Skylake and don't support Main10 hardware decoding
+                                if ([device.name containsString:@" 5"]) {
+                                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                                "No HEVC Main10 support on Skylake iGPU");
+                                    return false;
+                                }
+                            }
+                            else if ([device.name containsString:@"AMD"]) {
+                                // FirePro D, M200, and M300 series GPUs don't support Main10 hardware decoding
+                                if ([device.name containsString:@"FirePro D"] ||
+                                        [device.name containsString:@" M2"] ||
+                                        [device.name containsString:@" M3"]) {
+                                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                                "No HEVC Main10 support on AMD GPUs until Polaris");
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    else
+            #endif
+                    {
+                        // Fail closed for HEVC Main10 if we're not on 10.14+
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "No HEVC Main10 support on < macOS 10.14");
+                        return false;
+                    }
+                }
             }
             else
     #endif
@@ -310,10 +447,10 @@ public:
 
             switch (type) {
             case Overlay::OverlayDebug:
-                [m_OverlayTextFields[type] setAlignment:NSLeftTextAlignment];
+                [m_OverlayTextFields[type] setAlignment:NSTextAlignmentLeft];
                 break;
             case Overlay::OverlayStatusUpdate:
-                [m_OverlayTextFields[type] setAlignment:NSRightTextAlignment];
+                [m_OverlayTextFields[type] setAlignment:NSTextAlignmentRight];
                 break;
             default:
                 break;
@@ -363,7 +500,7 @@ public:
         }
     }
 
-    virtual bool prepareDecoderContext(AVCodecContext* context) override
+    virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override
     {
         context->hw_device_ctx = av_buffer_ref(m_HwContext);
 
@@ -382,6 +519,12 @@ public:
         return true;
     }
 
+    int getDecoderColorspace() override
+    {
+        // macOS seems to handle Rec 601 best
+        return COLORSPACE_REC_601;
+    }
+
 private:
     AVBufferRef* m_HwContext;
     AVSampleBufferDisplayLayer* m_DisplayLayer;
@@ -389,6 +532,7 @@ private:
     NSView* m_StreamView;
     NSTextField* m_OverlayTextFields[Overlay::OverlayMax];
     CVDisplayLinkRef m_DisplayLink;
+    CGColorSpaceRef m_ColorSpace;
     SDL_mutex* m_VsyncMutex;
     SDL_cond* m_VsyncPassed;
 };

@@ -30,6 +30,8 @@
 #include <QSvgRenderer>
 #include <QPainter>
 #include <QImage>
+#include <QGuiApplication>
+#include <QCursor>
 
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
@@ -37,8 +39,6 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageFailed,
     nullptr,
     Session::clConnectionTerminated,
-    nullptr,
-    nullptr,
     Session::clLogMessage,
     Session::clRumble,
     Session::clConnectionStatusUpdate
@@ -56,7 +56,7 @@ void Session::clStageStarting(int stage)
     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 }
 
-void Session::clStageFailed(int stage, long errorCode)
+void Session::clStageFailed(int stage, int errorCode)
 {
     // We know this is called on the same thread as LiStartConnection()
     // which happens to be the main thread, so it's cool to interact
@@ -65,7 +65,7 @@ void Session::clStageFailed(int stage, long errorCode)
     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 }
 
-void Session::clConnectionTerminated(long errorCode)
+void Session::clConnectionTerminated(int errorCode)
 {
     // Display the termination dialog if this was not intended
     if (errorCode != 0) {
@@ -74,7 +74,7 @@ void Session::clConnectionTerminated(long errorCode)
     }
 
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                 "Connection terminated: %ld",
+                 "Connection terminated: %d",
                  errorCode);
 
     // Push a quit event to the main loop
@@ -250,6 +250,25 @@ int Session::drSubmitDecodeUnit(PDECODE_UNIT du)
     }
 }
 
+void Session::getDecoderInfo(SDL_Window* window,
+                             bool& isHardwareAccelerated, bool& isFullScreenOnly, QSize& maxResolution)
+{
+    IVideoDecoder* decoder;
+
+    if (!chooseDecoder(StreamingPreferences::VDS_AUTO,
+                       window, VIDEO_FORMAT_H264, 1920, 1080, 60,
+                       true, false, true, decoder)) {
+        isHardwareAccelerated = isFullScreenOnly = false;
+        return;
+    }
+
+    isHardwareAccelerated = decoder->isHardwareAccelerated();
+    isFullScreenOnly = decoder->isAlwaysFullScreen();
+    maxResolution = decoder->getDecoderMaxResolution();
+
+    delete decoder;
+}
+
 bool Session::isHardwareDecodeAvailable(SDL_Window* window,
                                         StreamingPreferences::VideoDecoderSelection vds,
                                         int videoFormat, int width, int height, int frameRate)
@@ -267,21 +286,28 @@ bool Session::isHardwareDecodeAvailable(SDL_Window* window,
     return ret;
 }
 
-int Session::getDecoderCapabilities(SDL_Window* window,
-                                    StreamingPreferences::VideoDecoderSelection vds,
-                                    int videoFormat, int width, int height, int frameRate)
+bool Session::populateDecoderProperties(SDL_Window* window)
 {
     IVideoDecoder* decoder;
 
-    if (!chooseDecoder(vds, window, videoFormat, width, height, frameRate, true, false, true, decoder)) {
+    if (!chooseDecoder(m_Preferences->videoDecoderSelection,
+                       window,
+                       m_StreamConfig.enableHdr ? VIDEO_FORMAT_H265_MAIN10 :
+                            (m_StreamConfig.supportsHevc ? VIDEO_FORMAT_H265 : VIDEO_FORMAT_H264),
+                       m_StreamConfig.width,
+                       m_StreamConfig.height,
+                       m_StreamConfig.fps,
+                       true, false, true, decoder)) {
         return false;
     }
 
-    int caps = decoder->getDecoderCapabilities();
+    m_VideoCallbacks.capabilities = decoder->getDecoderCapabilities();
+
+    m_StreamConfig.colorSpace = decoder->getDecoderColorspace();
 
     delete decoder;
 
-    return caps;
+    return true;
 }
 
 Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences)
@@ -343,21 +369,12 @@ bool Session::initialize()
     m_VideoCallbacks.setup = drSetup;
     m_VideoCallbacks.submitDecodeUnit = drSubmitDecodeUnit;
 
-    // Slice up to 4 times for parallel decode, once slice per core
-    int slices = qMin(MAX_SLICES, SDL_GetCPUCount());
-    m_VideoCallbacks.capabilities |= CAPABILITY_SLICES_PER_FRAME(slices);
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Encoder configured for %d slices per frame",
-                slices);
-
     LiInitializeStreamConfiguration(&m_StreamConfig);
     m_StreamConfig.width = m_Preferences->width;
     m_StreamConfig.height = m_Preferences->height;
     m_StreamConfig.fps = m_Preferences->fps;
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
     m_StreamConfig.hevcBitratePercentageMultiplier = 75;
-    m_StreamConfig.streamingRemotely = STREAM_CFG_AUTO;
-    m_StreamConfig.packetSize = 1392;
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Video bitrate: %d kbps",
@@ -432,15 +449,6 @@ bool Session::initialize()
         break;
     }
 
-    // Add the capability flags from the chosen decoder/renderer
-    // Requires m_StreamConfig.supportsHevc to be initialized
-    m_VideoCallbacks.capabilities |= getDecoderCapabilities(testWindow,
-                                                            m_Preferences->videoDecoderSelection,
-                                                            m_StreamConfig.supportsHevc ? VIDEO_FORMAT_H265 : VIDEO_FORMAT_H264,
-                                                            m_StreamConfig.width,
-                                                            m_StreamConfig.height,
-                                                            m_StreamConfig.fps);
-
     switch (m_Preferences->windowMode)
     {
     default:
@@ -452,9 +460,26 @@ bool Session::initialize()
         break;
     }
 
+#if !SDL_VERSION_ATLEAST(2, 0, 11)
+    // HACK: Using a full-screen window breaks mouse capture on the Pi's LXDE
+    // GUI environment. Force the session to use windowed mode (which won't
+    // really matter anyway because the MMAL renderer always draws full-screen).
+    if (qgetenv("DESKTOP_SESSION") == "LXDE-pi") {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Forcing windowed mode on LXDE-Pi");
+        m_FullScreenFlag = 0;
+    }
+#endif
+
     // Check for validation errors/warnings and emit
     // signals for them, if appropriate
     bool ret = validateLaunch(testWindow);
+
+    if (ret) {
+        // Populate decoder-dependent properties.
+        // Must be done after validateLaunch() since m_StreamConfig is finalized.
+        ret = populateDecoderProperties(testWindow);
+    }
 
     SDL_DestroyWindow(testWindow);
 
@@ -487,7 +512,13 @@ bool Session::validateLaunch(SDL_Window* testWindow)
     QStringList warningList;
 
     if (m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_FORCE_SOFTWARE) {
-        emitLaunchWarning("Your settings selection to force software decoding may cause poor streaming performance.");
+        if (m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_HEVC_HDR) {
+            emitLaunchWarning("HDR is not supported with software decoding.");
+            m_StreamConfig.enableHdr = false;
+        }
+        else {
+            emitLaunchWarning("Your settings selection to force software decoding may cause poor streaming performance.");
+        }
     }
 
     if (m_Preferences->unsupportedFps && m_StreamConfig.fps > 60) {
@@ -502,13 +533,14 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         bool hevcForced = m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_HEVC ||
                 m_Preferences->videoCodecConfig == StreamingPreferences::VCC_FORCE_HEVC_HDR;
 
-        if (!isHardwareDecodeAvailable(testWindow,
-                                       m_Preferences->videoDecoderSelection,
-                                       VIDEO_FORMAT_H265,
-                                       m_StreamConfig.width,
-                                       m_StreamConfig.height,
-                                       m_StreamConfig.fps) &&
-                m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_AUTO) {
+        if (m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_AUTO && // Force hardware decoding checked below
+                m_Preferences->videoCodecConfig != StreamingPreferences::VCC_AUTO && // Already checked in initialize()
+                !isHardwareDecodeAvailable(testWindow,
+                                           m_Preferences->videoDecoderSelection,
+                                           VIDEO_FORMAT_H265,
+                                           m_StreamConfig.width,
+                                           m_StreamConfig.height,
+                                           m_StreamConfig.fps)) {
             if (hevcForced) {
                 emitLaunchWarning("Using software decoding due to your selection to force HEVC without GPU support. This may cause poor streaming performance.");
             }
@@ -594,6 +626,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
     }
 
     if (m_Preferences->videoDecoderSelection == StreamingPreferences::VDS_FORCE_HARDWARE &&
+            !m_StreamConfig.enableHdr && // HEVC Main10 was already checked for hardware decode support above
             !isHardwareDecodeAvailable(testWindow,
                                        m_Preferences->videoDecoderSelection,
                                        m_StreamConfig.supportsHevc ? VIDEO_FORMAT_H265 : VIDEO_FORMAT_H264,
@@ -937,6 +970,30 @@ void Session::exec(int displayOriginX, int displayOriginY)
         hostInfo.serverInfoGfeVersion = siGfeVersion.data();
     }
 
+    if (m_Preferences->packetSize != 0) {
+        // Override default packet size and remote streaming detection
+        // NB: Using STREAM_CFG_AUTO will cap our packet size at 1024 for remote hosts.
+        m_StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+        m_StreamConfig.packetSize = m_Preferences->packetSize;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using custom packet size: %d bytes",
+                    m_Preferences->packetSize);
+    }
+    else {
+        // isReachableOverVpn() does network I/O, so we only attempt to check
+        // VPN reachability if we've already contacted the PC successfully
+        if (m_Computer->isReachableOverVpn()) {
+            // It looks like our route to this PC is over a VPN.
+            // Treat it as remote even if the target address is in RFC 1918 address space.
+            m_StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+            m_StreamConfig.packetSize = 1024;
+        }
+        else {
+            m_StreamConfig.streamingRemotely = STREAM_CFG_AUTO;
+            m_StreamConfig.packetSize = 1392;
+        }
+    }
+
     int err = LiStartConnection(&hostInfo, &m_StreamConfig, &k_ConnCallbacks,
                                 &m_VideoCallbacks,
                                 m_AudioDisabled ? nullptr : &m_AudioCallbacks,
@@ -957,6 +1014,13 @@ void Session::exec(int displayOriginX, int displayOriginY)
 
     int x, y, width, height;
     getWindowDimensions(x, y, width, height);
+
+#ifdef STEAM_LINK
+    // We need a little delay before creating the window or we will trigger some kind
+    // of graphics driver bug on Steam Link that causes a jagged overlay to appear in
+    // the top right corner randomly.
+    SDL_Delay(500);
+#endif
 
     m_Window = SDL_CreateWindow("Moonlight",
                                 x,
@@ -1019,15 +1083,20 @@ void Session::exec(int displayOriginX, int displayOriginY)
         SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
     }
 
+    bool needsFirstEnterCapture = false;
+
 #ifndef QT_DEBUG
     // Capture the mouse by default on release builds only.
     // This prevents the mouse from becoming trapped inside
     // Moonlight when it's halted at a debug break.
     if (m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED) {
-        // HACK: This doesn't work on Wayland until we render a frame, so
-        // just don't do it for now.
+        // HACK: For Wayland, we wait until we get the first SDL_WINDOWEVENT_ENTER
+        // event where it seems to work consistently on GNOME.
         if (strcmp(SDL_GetCurrentVideoDriver(), "wayland") != 0) {
             m_InputHandler->setCaptureActive(true);
+        }
+        else {
+            needsFirstEnterCapture = true;
         }
     }
 #endif
@@ -1040,6 +1109,11 @@ void Session::exec(int displayOriginX, int displayOriginY)
 
     // Disable the screen saver
     SDL_DisableScreenSaver();
+
+    // Hide Qt's fake mouse cursor on EGLFS systems
+    if (QGuiApplication::platformName() == "eglfs") {
+        QGuiApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
+    }
 
     // Set timer resolution to 1 ms on Windows for greater
     // sleep precision and more accurate callback timing.
@@ -1123,6 +1197,12 @@ void Session::exec(int displayOriginX, int displayOriginY)
                 // Raise all keys that are currently pressed. If we don't do this, certain keys
                 // used in shortcuts that cause focus loss (such as Alt+Tab) may get stuck down.
                 m_InputHandler->raiseAllKeys();
+            }
+
+            // Capture the mouse on SDL_WINDOWEVENT_ENTER if needed
+            if (needsFirstEnterCapture && event.window.event == SDL_WINDOWEVENT_ENTER) {
+                m_InputHandler->setCaptureActive(true);
+                needsFirstEnterCapture = false;
             }
 
             // We want to recreate the decoder for resizes (full-screen toggles) and the initial shown event.
@@ -1253,6 +1333,9 @@ DispatchDeferredCleanup:
     m_InputHandler->setCaptureActive(false);
     SDL_EnableScreenSaver();
     SDL_SetHint(SDL_HINT_TIMER_RESOLUTION, "0");
+    if (QGuiApplication::platformName() == "eglfs") {
+        QGuiApplication::restoreOverrideCursor();
+    }
 
     // Raise any keys that are still down
     m_InputHandler->raiseAllKeys();

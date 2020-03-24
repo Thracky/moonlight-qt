@@ -18,6 +18,8 @@ public:
 
     virtual int getCapabilities();
 
+    virtual void remapChannels(POPUS_MULTISTREAM_CONFIGURATION opusConfig);
+
 private:
     static void slLogCallback(void* context, ESLAudioLog logLevel, const char* message);
 
@@ -26,6 +28,5 @@ private:
 
     void* m_AudioBuffer;
     int m_AudioBufferSize;
-    int m_FrameDuration;
     int m_MaxQueuedAudioMs;
 };
