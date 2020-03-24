@@ -9,6 +9,8 @@
 #include <QPalette>
 #include <QFont>
 #include <QCursor>
+#include <QElapsedTimer>
+#include <QFile>
 
 // Don't let SDL hook our main function, since Qt is already
 // doing the same thing. This needs to be before any headers
@@ -20,14 +22,17 @@
 #include "streaming/video/ffmpeg.h"
 #endif
 
-#ifdef Q_OS_WIN32
+#if defined(Q_OS_WIN32)
 #include "antihookingprotection.h"
+#elif defined(Q_OS_LINUX)
+#include <openssl/ssl.h>
 #endif
 
 #include "cli/quitstream.h"
 #include "cli/startstream.h"
 #include "cli/commandlineparser.h"
 #include "path.h"
+#include "utils.h"
 #include "gui/computermodel.h"
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
@@ -52,7 +57,7 @@
 #endif
 
 #ifdef USE_CUSTOM_LOGGER
-static QTime s_LoggerTime;
+static QElapsedTimer s_LoggerTime;
 static QTextStream s_LoggerStream(stdout);
 static QMutex s_LoggerLock;
 #ifdef LOG_TO_FILE
@@ -71,7 +76,12 @@ void logToLoggerStream(QString& message)
         return;
     }
     else if (s_LogLinesWritten == MAX_LOG_LINES) {
-        s_LoggerStream << "Log size limit reached!" << endl;
+        s_LoggerStream << "Log size limit reached!";
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        s_LoggerStream << Qt::endl;
+#else
+        s_LoggerStream << endl;
+#endif
         s_LogLimitReached = true;
         return;
     }
@@ -278,13 +288,44 @@ int main(int argc, char *argv[])
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
 #endif
 
-#ifdef Q_OS_WIN32
+#if defined(Q_OS_WIN32)
     // Force AntiHooking.dll to be statically imported and loaded
     // by ntdll by calling a dummy function.
     AntiHookingDummyImport();
+#elif defined(Q_OS_LINUX)
+    // Force libssl.so to be directly linked to our binary, so
+    // linuxdeployqt can find it and include it in our AppImage.
+    // QtNetwork will pull it in via dlopen().
+    SSL_free(nullptr);
 #endif
 
-    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    // Avoid using High DPI on EGLFS. It breaks font rendering.
+    // https://bugreports.qt.io/browse/QTBUG-64377
+    //
+    // NB: We can't use QGuiApplication::platformName() here because it is only
+    // set once the QGuiApplication is created, which is too late to enable High DPI :(
+    if (WMUtils::isRunningWindowManager()) {
+        // Enable High DPI support
+        QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        // Enable fractional High DPI scaling on Qt 5.14 and later
+        QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+#endif
+    }
+    else {
+#ifndef STEAM_LINK
+        if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM")) {
+            qInfo() << "Unable to detect Wayland or X11, so EGLFS will be used by default. Set QT_QPA_PLATFORM to override this.";
+            qputenv("QT_QPA_PLATFORM", "eglfs");
+
+            if (!QFile("/dev/dri").exists()) {
+                qWarning() << "Unable to find a KMSDRM display device!";
+                qWarning() << "On the Raspberry Pi, you must enable the 'fake KMS' driver in raspi-config to use Moonlight outside of the GUI environment.";
+            }
+        }
+#endif
+    }
 
     // This avoids using the default keychain for SSL, which may cause
     // password prompts on macOS.
@@ -326,6 +367,12 @@ int main(int argc, char *argv[])
     // initializing the SDL video subsystem to have any effect.
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
 
+    // For SDL backends that support it, use double buffering instead of triple buffering
+    // to save a frame of latency. This doesn't matter for MMAL or DRM renderers since they
+    // are drawing directly to the screen without involving SDL, but it may matter for other
+    // future KMSDRM platforms that use SDL for rendering.
+    SDL_SetHint(SDL_HINT_VIDEO_DOUBLE_BUFFER, "1");
+
     if (SDL_InitSubSystem(SDL_INIT_TIMER) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "SDL_InitSubSystem(SDL_INIT_TIMER) failed: %s",
@@ -356,6 +403,11 @@ int main(int argc, char *argv[])
     // Disable minimize on focus loss by default. Users seem to want this off by default.
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 
+    // SDL 2.0.12 changes the default behavior to use the button label rather than the button
+    // position as most other software does. Set this back to 0 to stay consistent with prior
+    // releases of Moonlight.
+    SDL_SetHint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
+
 #ifdef QT_DEBUG
     // Allow thread naming using exceptions on debug builds. SDL doesn't use SEH
     // when throwing the exceptions, so we don't enable it for release builds out
@@ -367,7 +419,7 @@ int main(int argc, char *argv[])
 
     // After the QGuiApplication is created, the platform stuff will be initialized
     // and we can set the SDL video driver to match Qt.
-    if (qgetenv("XDG_SESSION_TYPE") == "wayland" && QGuiApplication::platformName() == "xcb") {
+    if (WMUtils::isRunningWayland() && QGuiApplication::platformName() == "xcb") {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected XWayland. This will probably break hardware decoding! Try running with QT_QPA_PLATFORM=wayland or switch to X11.");
     }
@@ -390,6 +442,17 @@ int main(int argc, char *argv[])
     // Move the mouse to the bottom right so it's invisible when using
     // gamepad-only navigation.
     QCursor().setPos(0xFFFF, 0xFFFF);
+#elif !SDL_VERSION_ATLEAST(2, 0, 11) && defined(Q_OS_LINUX) && (defined(__arm__) || defined(__aarch64__))
+    if (qgetenv("SDL_VIDEO_GL_DRIVER").isEmpty() && QGuiApplication::platformName() == "eglfs") {
+        // Look for Raspberry Pi GLES libraries. SDL 2.0.10 and earlier needs some help finding
+        // the correct libraries for the KMSDRM backend if not compiled with the RPI backend enabled.
+        if (SDL_LoadObject("libbrcmGLESv2.so") != nullptr) {
+            qputenv("SDL_VIDEO_GL_DRIVER", "libbrcmGLESv2.so");
+        }
+        else if (SDL_LoadObject("/opt/vc/lib/libbrcmGLESv2.so") != nullptr) {
+            qputenv("SDL_VIDEO_GL_DRIVER", "/opt/vc/lib/libbrcmGLESv2.so");
+        }
+    }
 #endif
 
     app.setWindowIcon(QIcon(":/res/moonlight.svg"));
@@ -423,6 +486,9 @@ int main(int argc, char *argv[])
                                                    [](QQmlEngine*, QJSEngine*) -> QObject* {
                                                        return new StreamingPreferences();
                                                    });
+
+    // Create the identity manager on the main thread
+    IdentityManager::get();
 
 #ifndef Q_OS_WINRT
     // Use the dense material dark theme by default

@@ -32,7 +32,7 @@ private:
 
         QString serverInfo;
         try {
-            serverInfo = http.getServerInfo(NvHTTP::NvLogLevel::NVLL_NONE);
+            serverInfo = http.getServerInfo(NvHTTP::NvLogLevel::NVLL_NONE, true);
         } catch (...) {
             return false;
         }
@@ -84,7 +84,7 @@ private:
             bool stateChanged = false;
             bool online = false;
             bool wasOnline = m_Computer->state == NvComputer::CS_ONLINE;
-            for (int i = 0; i < TRIES_BEFORE_OFFLINING && !online; i++) {
+            for (int i = 0; i < (wasOnline ? TRIES_BEFORE_OFFLINING : 1) && !online; i++) {
                 for (auto& address : m_Computer->uniqueAddresses()) {
                     if (isInterruptionRequested()) {
                         return;
@@ -209,9 +209,10 @@ void ComputerManager::saveHosts()
 
     settings.remove(SER_HOSTS);
     settings.beginWriteArray(SER_HOSTS);
-    for (int i = 0; i < m_KnownHosts.count(); i++) {
-        settings.setArrayIndex(i);
-        m_KnownHosts.value(m_KnownHosts.keys()[i])->serialize(settings);
+    int i = 0;
+    for (const NvComputer* computer : m_KnownHosts) {
+        settings.setArrayIndex(i++);
+        computer->serialize(settings);
     }
     settings.endArray();
 }

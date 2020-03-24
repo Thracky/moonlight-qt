@@ -104,7 +104,7 @@ CenteredGridView {
         Image {
             id: pcIcon
             anchors.horizontalCenter: parent.horizontalCenter
-            source: "qrc:/res/ic_tv_white_48px.svg"
+            source: "qrc:/res/desktop_windows-48px.svg"
             sourceSize {
                 width: 200
                 height: 200
@@ -116,7 +116,7 @@ CenteredGridView {
             id: stateIcon
             anchors.horizontalCenter: pcIcon.horizontalCenter
             anchors.verticalCenter: pcIcon.verticalCenter
-            anchors.verticalCenterOffset: -10
+            anchors.verticalCenterOffset: -15
             visible: !model.statusUnknown && (!model.online || !model.paired)
             source: !model.online ? "qrc:/res/baseline-warning-24px.svg" : "qrc:/res/baseline-lock-24px.svg"
             sourceSize {
@@ -129,7 +129,7 @@ CenteredGridView {
             id: statusUnknownSpinner
             anchors.horizontalCenter: pcIcon.horizontalCenter
             anchors.verticalCenter: pcIcon.verticalCenter
-            anchors.verticalCenterOffset: -10
+            anchors.verticalCenterOffset: -15
             width: 75
             height: 75
             visible: model.statusUnknown
@@ -235,6 +235,12 @@ CenteredGridView {
 
     NavigableMessageDialog {
         id: pairDialog
+
+        // Pairing dialog must be modal to prevent double-clicks from triggering
+        // pairing twice
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+
         // don't allow edits to the rest of the window while open
         property string pin : "0000"
         text:"Please enter " + pin + " on your GameStream PC. This dialog will close when pairing is completed."

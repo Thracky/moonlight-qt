@@ -104,6 +104,16 @@ unix:!macx {
             CONFIG += libdrm
         }
     }
+
+    packagesExist(wayland-client) {
+        DEFINES += HAS_WAYLAND
+        PKGCONFIG += wayland-client
+    }
+
+    packagesExist(x11) {
+        DEFINES += HAS_X11
+        PKGCONFIG += x11
+    }
 }
 win32 {
     LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lopus -ld3dx9
@@ -114,7 +124,7 @@ win32:!winrt {
 }
 macx {
     LIBS += -lssl -lcrypto -lavcodec.58 -lavutil.56 -lopus -framework SDL2 -framework SDL2_ttf
-    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit
+    LIBS += -lobjc -framework VideoToolbox -framework AVFoundation -framework CoreVideo -framework CoreGraphics -framework CoreMedia -framework AppKit -framework Metal
 
     # For libsoundio
     LIBS += -framework CoreAudio -framework AudioUnit
@@ -148,7 +158,8 @@ SOURCES += \
     settings/mappingmanager.cpp \
     gui/sdlgamepadkeynavigation.cpp \
     streaming/video/overlaymanager.cpp \
-    backend/systemproperties.cpp
+    backend/systemproperties.cpp \
+    wm.cpp
 
 HEADERS += \
     utils.h \

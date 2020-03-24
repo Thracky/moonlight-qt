@@ -25,9 +25,8 @@ public:
     Q_INVOKABLE void exec(int displayOriginX, int displayOriginY);
 
     static
-    bool isHardwareDecodeAvailable(SDL_Window* window,
-                                   StreamingPreferences::VideoDecoderSelection vds,
-                                   int videoFormat, int width, int height, int frameRate);
+    void getDecoderInfo(SDL_Window* window,
+                       bool& isHardwareAccelerated, bool& isFullScreenOnly, QSize& maxResolution);
 
     static Session* get()
     {
@@ -42,7 +41,7 @@ public:
 signals:
     void stageStarting(QString stage);
 
-    void stageFailed(QString stage, long errorCode);
+    void stageFailed(QString stage, int errorCode);
 
     void connectionStarted();
 
@@ -61,10 +60,7 @@ private:
 
     void emitLaunchWarning(QString text);
 
-    static
-    int getDecoderCapabilities(SDL_Window* window,
-                               StreamingPreferences::VideoDecoderSelection vds,
-                               int videoFormat, int width, int height, int frameRate);
+    bool populateDecoderProperties(SDL_Window* window);
 
     IAudioRenderer* createAudioRenderer(const POPUS_MULTISTREAM_CONFIGURATION opusConfig);
 
@@ -82,6 +78,11 @@ private:
     void updateOptimalWindowDisplayMode();
 
     static
+    bool isHardwareDecodeAvailable(SDL_Window* window,
+                                   StreamingPreferences::VideoDecoderSelection vds,
+                                   int videoFormat, int width, int height, int frameRate);
+
+    static
     bool chooseDecoder(StreamingPreferences::VideoDecoderSelection vds,
                        SDL_Window* window, int videoFormat, int width, int height,
                        int frameRate, bool enableVsync, bool enableFramePacing,
@@ -92,10 +93,10 @@ private:
     void clStageStarting(int stage);
 
     static
-    void clStageFailed(int stage, long errorCode);
+    void clStageFailed(int stage, int errorCode);
 
     static
-    void clConnectionTerminated(long errorCode);
+    void clConnectionTerminated(int errorCode);
 
     static
     void clLogMessage(const char* format, ...);

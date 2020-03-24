@@ -3,6 +3,7 @@
 #include <QUdpSocket>
 #include <QHostInfo>
 #include <QNetworkInterface>
+#include <QNetworkProxy>
 
 #define SER_NAME "hostname"
 #define SER_UUID "uuid"
@@ -56,7 +57,7 @@ NvComputer::NvComputer(QSettings& settings)
     this->gpuModel = nullptr;
 }
 
-void NvComputer::serialize(QSettings& settings)
+void NvComputer::serialize(QSettings& settings) const
 {
     QReadLocker lock(&this->lock);
 
@@ -237,7 +238,82 @@ bool NvComputer::wake()
     return success;
 }
 
-QVector<QString> NvComputer::uniqueAddresses()
+bool NvComputer::isReachableOverVpn()
+{
+    if (activeAddress.isEmpty()) {
+        return false;
+    }
+
+    QTcpSocket s;
+
+    s.setProxy(QNetworkProxy::NoProxy);
+    s.connectToHost(activeAddress, 47984);
+    if (s.waitForConnected(3000)) {
+        Q_ASSERT(!s.localAddress().isNull());
+
+        for (const QNetworkInterface& nic : QNetworkInterface::allInterfaces()) {
+            // Ensure the interface is up
+            if ((nic.flags() & QNetworkInterface::IsUp) == 0) {
+                continue;
+            }
+
+            for (const QNetworkAddressEntry& addr : nic.addressEntries()) {
+                if (addr.ip() == s.localAddress()) {
+                    qInfo() << "Found matching interface:" << nic.humanReadableName() << nic.hardwareAddress() << nic.flags();
+
+#if QT_VERSION >= QT_VERSION_CHECK(5, 11, 0)
+                    qInfo() << "Interface Type:" << nic.type();
+                    qInfo() << "Interface MTU:" << nic.maximumTransmissionUnit();
+
+                    if (nic.type() == QNetworkInterface::Virtual ||
+                            nic.type() == QNetworkInterface::Ppp) {
+                        // Treat PPP and virtual interfaces as likely VPNs
+                        return true;
+                    }
+
+                    if (nic.maximumTransmissionUnit() != 0 && nic.maximumTransmissionUnit() < 1500) {
+                        // Treat MTUs under 1500 as likely VPNs
+                        return true;
+                    }
+#endif
+
+                    if (nic.flags() & QNetworkInterface::IsPointToPoint) {
+                        // Treat point-to-point links as likely VPNs.
+                        // This check detects OpenVPN on Unix-like OSes.
+                        return true;
+                    }
+
+                    if (nic.hardwareAddress().startsWith("00:FF", Qt::CaseInsensitive)) {
+                        // OpenVPN TAP interfaces have a MAC address starting with 00:FF on Windows
+                        return true;
+                    }
+
+                    if (nic.humanReadableName().startsWith("ZeroTier")) {
+                        // ZeroTier interfaces always start with "ZeroTier"
+                        return true;
+                    }
+
+                    if (nic.humanReadableName().contains("VPN")) {
+                        // This one is just a final heuristic if all else fails
+                        return true;
+                    }
+
+                    // Didn't meet any of our VPN heuristics
+                    return false;
+                }
+            }
+        }
+
+        qWarning() << "No match found for address:" << s.localAddress();
+        return false;
+    }
+    else {
+        // If we fail to connect, just pretend that it's not a VPN
+        return false;
+    }
+}
+
+QVector<QString> NvComputer::uniqueAddresses() const
 {
     QVector<QString> uniqueAddressList;
 

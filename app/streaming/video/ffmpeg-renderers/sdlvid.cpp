@@ -58,7 +58,7 @@ SdlRenderer::~SdlRenderer()
     }
 }
 
-bool SdlRenderer::prepareDecoderContext(AVCodecContext*)
+bool SdlRenderer::prepareDecoderContext(AVCodecContext*, AVDictionary**)
 {
     /* Nothing to do */
 
@@ -127,9 +127,29 @@ bool SdlRenderer::isRenderThreadSupported()
     return true;
 }
 
+bool SdlRenderer::isPixelFormatSupported(int, AVPixelFormat pixelFormat)
+{
+    // Remember to keep this in sync with SdlRenderer::renderFrame()!
+    switch (pixelFormat)
+    {
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_NV12:
+    case AV_PIX_FMT_NV21:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
 bool SdlRenderer::initialize(PDECODER_PARAMETERS params)
 {
     Uint32 rendererFlags = SDL_RENDERER_ACCELERATED;
+
+    if (params->videoFormat == VIDEO_FORMAT_H265_MAIN10) {
+        // SDL doesn't support rendering YUV 10-bit textures yet
+        return false;
+    }
 
     if ((SDL_GetWindowFlags(params->window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
         // In full-screen exclusive mode, we enable V-sync if requested. For other modes, Windows and Mac
@@ -255,12 +275,18 @@ void SdlRenderer::renderFrame(AVFrame* frame)
             goto Exit;
         }
 
+        // av_hwframe_transfer_data() can nuke frame metadata,
+        // so anything other than width, height, and format must
+        // be set *after* calling av_hwframe_transfer_data().
+        swFrame->colorspace = frame->colorspace;
+
         frame = swFrame;
     }
 
     if (m_Texture == nullptr) {
         Uint32 sdlFormat;
 
+        // Remember to keep this in sync with SdlRenderer::isPixelFormatSupported()!
         switch (frame->format)
         {
         case AV_PIX_FMT_YUV420P:
@@ -275,6 +301,18 @@ void SdlRenderer::renderFrame(AVFrame* frame)
         default:
             SDL_assert(false);
             goto Exit;
+        }
+
+        switch (frame->colorspace)
+        {
+        case AVCOL_SPC_BT709:
+            SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_BT709);
+            break;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+        default:
+            SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_BT601);
+            break;
         }
 
         m_Texture = SDL_CreateTexture(m_Renderer,

@@ -16,7 +16,10 @@ public:
     virtual ~FFmpegVideoDecoder() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool isHardwareAccelerated() override;
+    virtual bool isAlwaysFullScreen() override;
     virtual int getDecoderCapabilities() override;
+    virtual int getDecoderColorspace() override;
+    virtual QSize getDecoderMaxResolution() override;
     virtual int submitDecodeUnit(PDECODE_UNIT du) override;
     virtual void renderFrameOnMainThread() override;
 
@@ -60,11 +63,16 @@ private:
     VIDEO_STATS m_LastWndVideoStats;
     VIDEO_STATS m_GlobalVideoStats;
 
+    int m_FramesIn;
+    int m_FramesOut;
+
     int m_LastFrameNumber;
     int m_StreamFps;
+    int m_VideoFormat;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;
 
     static const uint8_t k_H264TestFrame[];
-    static const uint8_t k_HEVCTestFrame[];
+    static const uint8_t k_HEVCMainTestFrame[];
+    static const uint8_t k_HEVCMain10TestFrame[];
 };

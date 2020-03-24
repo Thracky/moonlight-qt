@@ -10,9 +10,10 @@ public:
     DrmRenderer();
     virtual ~DrmRenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
-    virtual bool prepareDecoderContext(AVCodecContext* context) override;
+    virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual enum AVPixelFormat getPreferredPixelFormat(int videoFormat) override;
+    virtual int getRendererAttributes() override;
 
 private:
     int m_DrmFd;

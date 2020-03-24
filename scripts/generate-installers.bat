@@ -159,6 +159,12 @@ if "%SIGN%"=="1" (
     if !ERRORLEVEL! NEQ 0 goto Error
 )
 
+if "%ML_SYMBOL_STORE%" NEQ "" (
+    echo Publishing binaries to symbol store: %ML_SYMBOL_STORE%
+    symstore add /r /f %DEPLOY_FOLDER%\*.* /s %ML_SYMBOL_STORE% /t Moonlight
+    if !ERRORLEVEL! NEQ 0 goto Error
+)
+
 echo Building MSI
 msbuild %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH%
 if !ERRORLEVEL! NEQ 0 goto Error
@@ -199,15 +205,6 @@ echo. > %DEPLOY_FOLDER%\portable.dat
 if !ERRORLEVEL! NEQ 0 goto Error
 7z a %INSTALLER_FOLDER%\MoonlightPortable-%ARCH%-%VERSION%.zip %DEPLOY_FOLDER%\*
 if !ERRORLEVEL! NEQ 0 goto Error
-
-if /i "%APPVEYOR%"=="true" (
-    echo Pushing artifacts
-    appveyor PushArtifact %INSTALLER_FOLDER%\MoonlightSetup-%ARCH%-%VERSION%.exe -FileName MoonlightSetup-%ARCH%-%BUILD_CONFIG%.exe
-    if !ERRORLEVEL! NEQ 0 goto Error
-    appveyor PushArtifact %INSTALLER_FOLDER%\MoonlightPortable-%ARCH%-%VERSION%.zip -FileName MoonlightPortable-%ARCH%-%BUILD_CONFIG%.zip
-    if !ERRORLEVEL! NEQ 0 goto Error
-    appveyor PushArtifact %SYMBOLS_FOLDER%\MoonlightDebuggingSymbols-%ARCH%-%VERSION%.zip -FileName MoonlightDebuggingSymbols-%ARCH%-%BUILD_CONFIG%.zip
-)
 
 echo Build successful for Moonlight v%VERSION%!
 exit /b 0

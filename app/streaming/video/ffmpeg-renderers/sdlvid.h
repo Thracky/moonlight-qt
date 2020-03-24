@@ -9,10 +9,11 @@ public:
     SdlRenderer();
     virtual ~SdlRenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
-    virtual bool prepareDecoderContext(AVCodecContext* context) override;
+    virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary** options) override;
     virtual void renderFrame(AVFrame* frame) override;
     virtual void notifyOverlayUpdated(Overlay::OverlayType) override;
     virtual bool isRenderThreadSupported() override;
+    virtual bool isPixelFormatSupported(int videoFormat, enum AVPixelFormat pixelFormat) override;
 
 private:
     void renderOverlay(Overlay::OverlayType type);

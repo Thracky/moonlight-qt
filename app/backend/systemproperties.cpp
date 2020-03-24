@@ -1,4 +1,5 @@
 #include "systemproperties.h"
+#include "utils.h"
 
 #include <QGuiApplication>
 
@@ -7,8 +8,9 @@
 
 SystemProperties::SystemProperties()
 {
-    isRunningWayland = qgetenv("XDG_SESSION_TYPE") == "wayland";
-    isRunningXWayland = qgetenv("XDG_SESSION_TYPE") == "wayland" && QGuiApplication::platformName() == "xcb";
+    hasWindowManager = WMUtils::isRunningWindowManager();
+    isRunningWayland = WMUtils::isRunningWayland();
+    isRunningXWayland = isRunningWayland && QGuiApplication::platformName() == "xcb";
 
 #ifdef Q_OS_WIN32
     isWow64 = QSysInfo::currentCpuArchitecture() != QSysInfo::buildCpuArchitecture();
@@ -17,7 +19,8 @@ SystemProperties::SystemProperties()
 #endif
 
 #ifndef STEAM_LINK
-    hasBrowser = true;
+    // Assume we can probably launch a browser if we're in a GUI environment
+    hasBrowser = hasWindowManager;
 #else
     hasBrowser = false;
 #endif
@@ -111,11 +114,7 @@ void SystemProperties::querySdlVideoInfo()
         return;
     }
 
-    hasHardwareAcceleration =
-            Session::isHardwareDecodeAvailable(testWindow,
-                                               StreamingPreferences::VDS_AUTO,
-                                               VIDEO_FORMAT_H264,
-                                               1920, 1080, 60);
+    Session::getDecoderInfo(testWindow, hasHardwareAcceleration, rendererAlwaysFullScreen, maximumResolution);
 
     SDL_DestroyWindow(testWindow);
 

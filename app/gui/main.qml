@@ -17,7 +17,7 @@ ApplicationWindow {
     width: 1280
     height: 600
 
-    visibility: StreamingPreferences.startWindowed ? "Windowed" : "Maximized"
+    visibility: (SystemProperties.hasWindowManager && StreamingPreferences.startWindowed) ? "Windowed" : "Maximized"
 
     StackView {
         id: stackView
@@ -245,7 +245,11 @@ ApplicationWindow {
                 // an update is available
                 visible: false
 
-                onClicked: Qt.openUrlExternally(browserUrl);
+                onClicked: {
+                    if (SystemProperties.hasBrowser) {
+                        Qt.openUrlExternally(browserUrl);
+                    }
+                }
 
                 function updateAvailable(version, url)
                 {
@@ -407,6 +411,10 @@ ApplicationWindow {
         onOpened: {
             // Force keyboard focus on the textbox so keyboard navigation works
             editText.forceActiveFocus()
+        }
+
+        onClosed: {
+            editText.clear()
         }
 
         onAccepted: {

@@ -23,7 +23,6 @@ bool SLAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* o
     // it's hard to avoid since we get crushed by CPU limitations.
     m_MaxQueuedAudioMs = 40 * opusConfig->channelCount / 2;
 
-    m_FrameDuration = opusConfig->samplesPerFrame / 48;
     m_AudioBufferSize = opusConfig->samplesPerFrame * sizeof(short) * opusConfig->channelCount;
     m_AudioStream = SLAudio_CreateStream(m_AudioContext,
                                          opusConfig->sampleRate,
@@ -37,10 +36,33 @@ bool SLAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* o
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Using SLAudio renderer with %d ms frames",
-                m_FrameDuration);
+                "Using SLAudio renderer with %d samples per frame",
+                opusConfig->samplesPerFrame);
 
     return true;
+}
+
+#define SWAP_CHANNEL(i, j) \
+    tmp = opusConfig->mapping[i]; \
+    opusConfig->mapping[i] = opusConfig->mapping[j]; \
+    opusConfig->mapping[j] = tmp
+
+void SLAudioRenderer::remapChannels(POPUS_MULTISTREAM_CONFIGURATION opusConfig) {
+    unsigned char tmp;
+
+    if (opusConfig->channelCount == 6) {
+        // The Moonlight's default channel order is FL,FR,C,LFE,RL,RR
+        // SLAudio expects FL,C,FR,RL,RR,LFE so we swap the channels around to match
+
+        // Swap FR and C - now FL,C,FR,LFE,RL,RR
+        SWAP_CHANNEL(1, 2);
+
+        // Swap LFE and RR - now FL,C,FR,RR,RL,LFE
+        SWAP_CHANNEL(3, 5);
+
+        // Swap RR and RL - now FL,C,FR,RL,RR,LFE
+        SWAP_CHANNEL(3, 4);
+    }
 }
 
 void* SLAudioRenderer::getAudioBuffer(int* size)
@@ -77,7 +99,7 @@ bool SLAudioRenderer::submitAudio(int bytesWritten)
         return true;
     }
 
-    if (LiGetPendingAudioFrames() * m_FrameDuration < m_MaxQueuedAudioMs) {
+    if (LiGetPendingAudioDuration() < m_MaxQueuedAudioMs) {
         SLAudio_SubmitFrame(m_AudioStream);
         m_AudioBuffer = nullptr;
     }
@@ -92,7 +114,7 @@ bool SLAudioRenderer::submitAudio(int bytesWritten)
 
 int SLAudioRenderer::getCapabilities()
 {
-    return CAPABILITY_SLOW_OPUS_DECODER;
+    return CAPABILITY_SLOW_OPUS_DECODER | CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
 }
 
 void SLAudioRenderer::slLogCallback(void*, ESLAudioLog logLevel, const char *message)
